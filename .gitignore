@@ -1,0 +1,18 @@
+# Argus
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/dist/
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.local
+node_modules/

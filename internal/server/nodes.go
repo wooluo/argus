@@ -1,0 +1,238 @@
+package server
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"math/rand"
+	"net/http"
+
+	"github.com/wooluo/argus/internal/auth"
+	"github.com/wooluo/argus/internal/store"
+)
+
+// NodeAPI: 执行面 API（argus-node 调用）。
+// 模型： 节点注册（管理 token 开启）→ 心跳 → 轮询领取 → 执行 → 回传结果。
+type NodeAPI struct {
+	DB       *sql.DB
+	Bus      eventsBus
+	NodeAuth *auth.NodeAuth
+}
+
+// eventsBus: server 包内事件发布接口（events.Bus 实现）。
+type eventsBus interface {
+	Publish(event string, data any)
+}
+
+func jout(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func jerr(w http.ResponseWriter, code int, msg string) {
+	jout(w, code, map[string]string{"detail": msg})
+}
+
+var nodeTokenChars = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+func genNodeToken() string {
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = nodeTokenChars[rand.Intn(len(nodeTokenChars))]
+	}
+	return string(b)
+}
+
+// ListNodes: GET /api/nodes/ （管理面，UI 用）
+func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
+	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at FROM nodes ORDER BY id`)
+	if err != nil {
+		jerr(w, 500, err.Error()); return
+	}
+	defer rows.Close()
+	type nodeRow struct {
+		ID        int    `json:"id"`
+		Name      string `json:"name"`
+		Platform  string `json:"platform"`
+		Hostname  string `json:"hostname"`
+		Version   string `json:"version"`
+		Status    string `json:"status"`
+		LastSeen  string `json:"last_seen"`
+		CreatedAt string `json:"created_at"`
+	}
+	out := []nodeRow{}
+	for rows.Next() {
+		var v nodeRow
+		if err := rows.Scan(&v.ID, &v.Name, &v.Platform, &v.Hostname, &v.Version, &v.Status, &v.LastSeen, &v.CreatedAt); err != nil {
+			jerr(w, 500, err.Error()); return
+		}
+		out = append(out, v)
+	}
+	jout(w, 200, out)
+}
+
+// Register: POST /api/nodes/register {"name":"kali-1","capabilities":["nmap","httpx"]}
+func (n *NodeAPI) Register(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name         string   `json:"name"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		jerr(w, 422, "name required")
+		return
+	}
+	tok := genNodeToken()
+	caps, _ := json.Marshal(req.Capabilities)
+	res, err := n.DB.Exec(`INSERT INTO nodes(name,token,capabilities,status,last_seen) VALUES(?,?,?,?,?)`,
+		req.Name, tok, string(caps), "online", store.Now())
+	if err != nil {
+		jerr(w, 500, err.Error())
+		return
+	}
+	id, _ := res.LastInsertId()
+	if n.NodeAuth != nil {
+		n.NodeAuth.Set(tok, id)
+	}
+	n.Bus.Publish("node_registered", map[string]any{"id": id, "name": req.Name})
+	jout(w, 201, map[string]any{"node_id": id, "token": tok})
+}
+
+// Heartbeat: POST /api/nodes/heartbeat {"node_id":1} — 更新 last_seen。
+func (n *NodeAPI) Heartbeat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NodeID int64 `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NodeID == 0 {
+		jerr(w, 422, "node_id required")
+		return
+	}
+	if _, err := n.DB.Exec(`UPDATE nodes SET last_seen=?,status='online' WHERE id=?`, store.Now(), req.NodeID); err != nil {
+		jerr(w, 500, err.Error())
+		return
+	}
+	n.Bus.Publish("node_heartbeat", map[string]any{"node_id": req.NodeID})
+	jout(w, 200, map[string]any{"ok": true})
+}
+
+// Poll: GET /api/nodes/poll?node_id=1 — 领取一条待执行任务（原子抢占）。
+func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.URL.Query().Get("node_id")
+	var node store.Node
+	err := n.DB.QueryRow(`SELECT id,name,token,capabilities,status,last_seen FROM nodes WHERE id=?`, nodeID).
+		Scan(&node.ID, &node.Name, &node.Token, &node.Capabilities, &node.Status, &node.LastSeen)
+	if err != nil {
+		jerr(w, 404, "node not found")
+		return
+	}
+
+	row := n.DB.QueryRow(`
+		SELECT t.id FROM tasks t
+		JOIN projects p ON p.id=t.project_id
+		WHERE t.status IN ('pending','running') AND p.authorized=1
+		ORDER BY t.id LIMIT 1`)
+	var taskID int64
+	if err := row.Scan(&taskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jout(w, 200, map[string]any{"task": nil})
+			return
+		}
+		jerr(w, 500, err.Error())
+		return
+	}
+	res, err := n.DB.Exec(`UPDATE tasks SET status='assigned',node_id=?,assigned_at=? WHERE id=? AND status IN ('pending','running')`,
+		node.ID, store.Now(), taskID)
+	if err != nil || rowsAffected(res) == 0 {
+		jout(w, 200, map[string]any{"task": nil})
+		return
+	}
+	var t store.Task
+	var finishedAt, assignedAt sql.NullString
+	err = n.DB.QueryRow(`SELECT id,project_id,name,status,mode,current_stage,tokens,message,node_id,created_at,finished_at,assigned_at FROM tasks WHERE id=?`, taskID).
+		Scan(&t.ID, &t.ProjectID, &t.Name, &t.Status, &t.Mode, &t.CurrentStage, &t.Tokens, &t.Message, &t.NodeID, &t.CreatedAt, &finishedAt, &assignedAt)
+	if err != nil {
+		jerr(w, 500, err.Error())
+		return
+	}
+	t.FinishedAt = nilOrString(finishedAt)
+	t.AssignedAt = nilOrString(assignedAt)
+	jout(w, 200, map[string]any{"task": t})
+}
+
+// ReportResult: POST /api/nodes/result — 节点执行完毕回传 findings/assets/logs。
+func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID   int64  `json:"task_id"`
+		Status   string `json:"status"` // done | failed | partial
+		Message  string `json:"message"`
+		Findings []struct {
+			Name     string `json:"name"`
+			Severity string `json:"severity"`
+			Target   string `json:"target"`
+			Detail   string `json:"detail"`
+			Evidence string `json:"evidence"`
+			PoC      string `json:"poc"`
+		} `json:"findings"`
+		Assets []struct {
+			Type   string `json:"type"`
+			Value  string `json:"value"`
+			Detail string `json:"detail"`
+		} `json:"assets"`
+		Logs []struct {
+			Stage   string `json:"stage"`
+			Tool    string `json:"tool"`
+			Content string `json:"content"`
+		} `json:"logs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == 0 {
+		jerr(w, 422, "task_id required")
+		return
+	}
+	for _, f := range req.Findings {
+		sev := f.Severity
+		if sev == "" {
+			sev = "info"
+		}
+		if _, err := n.DB.Exec(`INSERT INTO findings(project_id,name,severity,target,detail,evidence,poc,source)
+			SELECT project_id,?,?,?,?,?,?,'node' FROM tasks WHERE id=?`,
+			f.Name, sev, f.Target, f.Detail, f.Evidence, f.PoC, req.TaskID); err != nil {
+			jerr(w, 500, err.Error())
+			return
+		}
+	}
+	for _, s := range req.Assets {
+		if _, err := n.DB.Exec(`INSERT INTO assets(project_id,type,value,detail,source)
+			SELECT project_id,?,?,?,?,'node' FROM tasks WHERE id=?`,
+			s.Type, s.Value, s.Detail, req.TaskID); err != nil {
+			jerr(w, 500, err.Error())
+			return
+		}
+	}
+	for _, l := range req.Logs {
+		_, _ = n.DB.Exec(`INSERT INTO agent_logs(task_id,stage,tool,content) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM tasks WHERE id=?)`,
+			req.TaskID, l.Stage, l.Tool, l.Content, req.TaskID)
+	}
+	status := req.Status
+	if status == "" {
+		status = "done"
+	}
+	if _, err := n.DB.Exec(`UPDATE tasks SET status=?,finished_at=?,message=? WHERE id=?`,
+		status, store.Now(), req.Message, req.TaskID); err != nil {
+		jerr(w, 500, err.Error())
+		return
+	}
+	n.Bus.Publish("task_done", map[string]any{"task_id": req.TaskID, "status": status})
+	jout(w, 200, map[string]any{"ok": true})
+}
+
+func rowsAffected(res sql.Result) int64 {
+	n, _ := res.RowsAffected()
+	return n
+}
+
+func nilOrString(ns sql.NullString) any {
+	if ns.Valid {
+		return ns.String
+	}
+	return nil
+}
