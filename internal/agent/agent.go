@@ -42,8 +42,12 @@ type Agent struct {
 	// recentCalls 近 16 次工具调用签名（同参重复直接拦截）
 	recentCalls map[string]string // 签名 → 上次结果摘要
 	callOrder   []string          // 签名时效（LRU 裁剪）
-	digest  []string // 工作纪要（上下文压缩后的攻击链记忆）
-	nudges  int      // 过早收工纠正次数（上限 3）
+	digest     []string // 工作纪要（上下文压缩后的攻击链记忆）
+	nudges     int      // 过早收工纠正次数（上限 3）
+	failStreak int      // 连续工具失败计数（≥2 次注入换思路提示）
+	tokPrompt    int64  // LLM token 累计（prompt）
+	tokCompletion int64 // LLM token 累计（completion）
+	tokCalls     int64  // LLM 调用次数
 	// resHist 响应收敛检测：归一化指纹滑窗 3 次，全同即注入换思路提示
 	resHist  [3]string
 	resHistN int
@@ -112,6 +116,7 @@ func (a *Agent) Run(ctx context.Context, system, brief string) (string, error) {
 		if len(resp.Choices) == 0 {
 			return "", fmt.Errorf("LLM 返回空 choices")
 		}
+		a.recordTokens(resp)
 		choice := resp.Choices[0]
 		msg := choice.Message
 
@@ -213,12 +218,20 @@ func (a *Agent) executeOne(ctx context.Context, call llm.ToolCall, byName map[st
 			step, call.Function.Name, compactArgs(args), resultSummary(out, err), dur.Seconds()))
 	}
 	if err != nil {
-		// 工具错误回给模型继续推理（原版行为），fatal（如 ScopeViolation）也回模型
+		// 失败连击：同工具连续失败 ≥2 次时注入换思路提示（蓝本 _track_failure）
+		a.failStreak++
+		content := "错误: " + err.Error()
+		if a.failStreak >= 2 {
+			content += "\n\n⚠ 该工具已连续失败 " + fmt.Sprint(a.failStreak) +
+				" 次。根据工作纪律第 3 条：同一调用失败 2 次后必须换思路，不要原样重试。" +
+				"请更换参数、换一个工具，或跳过此路径。"
+		}
 		return llm.Message{
 			Role: "tool", ToolCallID: call.ID, Name: call.Function.Name,
-			Content: "错误: " + err.Error(),
+			Content: content,
 		}, ""
 	}
+	a.failStreak = 0 // 成功即重置
 	content := tools.Truncate(out, 6000)
 	// ── 响应收敛检测：归一化（数字→N）指纹，滑窗 3 次全同提示换思路 ──
 	if conv := a.noteConverge(out); conv != "" {
@@ -294,4 +307,24 @@ func budgetFor(base, assets int) int {
 		n = 300
 	}
 	return n
+}
+
+
+// recordTokens 累计 LLM token 用量（蓝本 _record_tokens → tasks.tokens）。
+func (a *Agent) recordTokens(resp *llm.ChatResp) {
+	if resp == nil || resp.Usage == nil {
+		return
+	}
+	a.mu.Lock()
+	a.tokPrompt += int64(resp.Usage.PromptTokens)
+	a.tokCompletion += int64(resp.Usage.CompletionTokens)
+	a.tokCalls++
+	a.mu.Unlock()
+}
+
+// Tokens 返回累计 token 用量（pipeline 写入任务记录）。
+func (a *Agent) Tokens() (prompt, completion, calls int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tokPrompt, a.tokCompletion, a.tokCalls
 }

@@ -61,6 +61,7 @@ type Result struct {
 	Assets   []Asset   `json:"assets"`
 	Logs     []LogItem `json:"logs"`
 	Report   string    `json:"report"`
+	Tokens   map[string]int64 `json:"tokens,omitempty"`
 }
 
 // memReporter 缓冲式 Reporter：工具产出先攒在内存（阶段间 _data_summary 直接

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 	"time"
 	"strconv"
 	"database/sql"
@@ -307,4 +309,119 @@ func (a *API) SystemLogs(w http.ResponseWriter, r *http.Request) {
 		out = append(out, it)
 	}
 	respondJSON(w, 200, out)
+}
+
+// ============ Approvals 域（蓝本 api/approvals.py：待审批列表 + 批准/拒绝 + 规则配置） ============
+
+// ListApprovals GET /api/approvals — 待审批的工具调用列表。
+func (a *API) ListApprovals(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "pending"
+	}
+	rows, err := a.DB.Query(`
+		SELECT id, task_id, project_id, tool, args, status, decided_by, reason, created_at
+		FROM approvals WHERE status=? ORDER BY id DESC LIMIT 100`, status)
+	if err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	type approval struct {
+		ID        int64          `json:"id"`
+		TaskID    int64          `json:"task_id"`
+		ProjectID int64          `json:"project_id"`
+		Tool      string         `json:"tool"`
+		Args      map[string]any `json:"args"`
+		Status    string         `json:"status"`
+		DecidedBy string         `json:"decided_by"`
+		Reason    string         `json:"reason"`
+		CreatedAt string         `json:"created_at"`
+	}
+	out := []approval{}
+	for rows.Next() {
+		var it approval
+		var args sql.NullString
+		var decidedBy, reason sql.NullString
+		if err := rows.Scan(&it.ID, &it.TaskID, &it.ProjectID, &it.Tool, &args, &it.Status, &decidedBy, &reason, &it.CreatedAt); err != nil {
+			continue
+		}
+		it.Args = map[string]any{}
+		if args.Valid && args.String != "" {
+			_ = json.Unmarshal([]byte(args.String), &it.Args)
+		}
+		it.DecidedBy, it.Reason = decidedBy.String, reason.String
+		out = append(out, it)
+	}
+	respondJSON(w, 200, out)
+}
+
+// DecideApproval POST /api/approvals/{id}/decide — 批准或拒绝。
+func (a *API) DecideApproval(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respondErr(w, 422, "missing id")
+		return
+	}
+	var req struct {
+		Approve bool   `json:"approve"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondErr(w, 422, err.Error())
+		return
+	}
+	status := "denied"
+	if req.Approve {
+		status = "approved"
+	}
+	res, err := a.DB.Exec(
+		`UPDATE approvals SET status=?, decided_by=?, reason=? WHERE id=? AND status='pending'`,
+		status, "operator", req.Reason, id)
+	if err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		respondErr(w, 404, "approval not found or already decided")
+		return
+	}
+	respondJSON(w, 200, map[string]any{"ok": true, "status": status})
+}
+
+// GetApprovalConfig GET /api/approvals/config — 哪些工具需要审批。
+func (a *API) GetApprovalConfig(w http.ResponseWriter, r *http.Request) {
+	v := settingStr(a.DB, "approvals_require")
+	tools := []string{}
+	_ = json.Unmarshal([]byte(v), &tools)
+	respondJSON(w, 200, map[string]any{"require": tools})
+}
+
+// PutApprovalConfig PUT /api/approvals/config — 设置需要审批的工具列表。
+func (a *API) PutApprovalConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Require []string `json:"require"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondErr(w, 422, err.Error())
+		return
+	}
+	b, _ := json.Marshal(req.Require)
+	if err := settingSet(a.DB, "approvals_require", string(b)); err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	respondJSON(w, 200, map[string]any{"ok": true})
+}
+
+
+func settingStr(db *sql.DB, key string) string {
+	var v sql.NullString
+	_ = db.QueryRow("SELECT value FROM settings WHERE key=?", key).Scan(&v)
+	return v.String
+}
+
+func settingSet(db *sql.DB, key, val string) error {
+	_, err := db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, val)
+	return err
 }

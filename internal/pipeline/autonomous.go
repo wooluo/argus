@@ -30,6 +30,9 @@ func runAutonomous(ctx context.Context, b Brief, tc *tools.Context, rep *memRepo
 	}, tools.All(), tc)
 
 	final, err := a.Run(ctx, system, brief)
+	// Token 统计写入结果（server 侧存 tasks.tokens）
+	p, c, calls := a.Tokens()
+	res.Tokens = map[string]int64{"prompt": p, "completion": c, "calls": calls}
 	if err != nil {
 		res.Status, res.Message = failStatus(ctx, err)
 		return

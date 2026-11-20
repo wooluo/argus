@@ -122,7 +122,14 @@ type chatRequest struct {
 	MaxTokens   int        `json:"max_tokens,omitempty"`
 }
 
-type chatResponse struct {
+type Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	}
+
+type ChatResp struct {
+		Usage *Usage `json:"usage,omitempty"`
 	Choices []struct {
 		Message struct {
 			Role      string     `json:"role"`
@@ -138,7 +145,7 @@ type chatResponse struct {
 }
 
 // Chat 调用 chat/completions（带指数退避重试）。
-func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec, temperature float64) (*chatResponse, error) {
+func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec, temperature float64) (*ChatResp, error) {
 	cfg := c.provider.LLMConfig()
 	if cfg.BaseURL == "" {
 		return nil, &Error{Msg: "LLM 未配置 base_url"}
@@ -175,7 +182,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec,
 			data, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				var out chatResponse
+				var out ChatResp
 				if err := json.Unmarshal(data, &out); err != nil {
 					return nil, &Error{Msg: "响应解析失败: " + err.Error()}
 				}
