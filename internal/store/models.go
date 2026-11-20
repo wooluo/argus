@@ -55,40 +55,40 @@ func (r RawJSON) Value() (driver.Value, error) {
 // ---- 模型（JSON 序列化字段用 RawJSON 保持 schema 灋活）----
 
 type Project struct {
-	ID          int      `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Scope       RawJSON  `json:"scope"`       // [{type,value}]
-	Authorized  bool     `json:"authorized"`
-	AllowHosts  RawJSON  `json:"allow_hosts"` // [{type,value}]
-	CreatedAt   string   `json:"created_at"`
+	ID          int     `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Scope       RawJSON `json:"scope"` // [{type,value}]
+	Authorized  bool    `json:"authorized"`
+	AllowHosts  RawJSON `json:"allow_hosts"` // [{type,value}]
+	CreatedAt   string  `json:"created_at"`
 }
 
 type Task struct {
-	ID           int      `json:"id"`
-	ProjectID    int      `json:"project_id"`
-	Name         string   `json:"name"`
-	Status       string   `json:"status"`
-	Mode         string   `json:"mode"`
-	CurrentStage string   `json:"current_stage"`
-	Tokens       RawJSON  `json:"tokens"`
-	StagesDone   RawJSON  `json:"stages_done"`
-	Message      string   `json:"message"`
-	CreatedAt    string   `json:"created_at"`
-	StartedAt    any      `json:"started_at"`
-	FinishedAt   any      `json:"finished_at"`
-	NodeID       int      `json:"node_id"`
-	AssignedAt   any             `json:"assigned_at"`
+	ID           int     `json:"id"`
+	ProjectID    int     `json:"project_id"`
+	Name         string  `json:"name"`
+	Status       string  `json:"status"`
+	Mode         string  `json:"mode"`
+	CurrentStage string  `json:"current_stage"`
+	Tokens       RawJSON `json:"tokens"`
+	StagesDone   RawJSON `json:"stages_done"`
+	Message      string  `json:"message"`
+	CreatedAt    string  `json:"created_at"`
+	StartedAt    any     `json:"started_at"`
+	FinishedAt   any     `json:"finished_at"`
+	NodeID       int     `json:"node_id"`
+	AssignedAt   any     `json:"assigned_at"`
 }
 
 type Asset struct {
-	ID        int             `json:"id"`
-	ProjectID int             `json:"project_id"`
-	Type      string          `json:"type"`
-	Value     string          `json:"value"`
-	Detail    RawJSON  `json:"detail"`
-	Source    string          `json:"source"`
-	CreatedAt string          `json:"created_at"`
+	ID        int     `json:"id"`
+	ProjectID int     `json:"project_id"`
+	Type      string  `json:"type"`
+	Value     string  `json:"value"`
+	Detail    RawJSON `json:"detail"`
+	Source    string  `json:"source"`
+	CreatedAt string  `json:"created_at"`
 }
 
 type Finding struct {
@@ -107,15 +107,15 @@ type Finding struct {
 }
 
 type AgentLog struct {
-	ID            int             `json:"id"`
-	TaskID        int             `json:"task_id"`
-	Stage         string          `json:"stage"`
-	Type          string          `json:"type"`
-	Tool          string          `json:"tool"`
-	Args          RawJSON  `json:"args"`
-	Content       string          `json:"content"`
-	ResultSummary string          `json:"result_summary"`
-	CreatedAt     string          `json:"created_at"`
+	ID            int     `json:"id"`
+	TaskID        int     `json:"task_id"`
+	Stage         string  `json:"stage"`
+	Type          string  `json:"type"`
+	Tool          string  `json:"tool"`
+	Args          RawJSON `json:"args"`
+	Content       string  `json:"content"`
+	ResultSummary string  `json:"result_summary"`
+	CreatedAt     string  `json:"created_at"`
 }
 
 type Report struct {
@@ -127,28 +127,28 @@ type Report struct {
 }
 
 type Node struct {
-	ID        int             `json:"id"`
-	Name         string          `json:"name"`
-	Token        string          `json:"-"`
-	Capabilities RawJSON  `json:"capabilities"`
-	Platform     string          `json:"platform"`
-	Hostname  string          `json:"hostname"`
-	Version   string          `json:"version"`
-	Tags      RawJSON  `json:"tags"`
-	Status    string          `json:"status"`
-	LastSeen  string          `json:"last_seen"`
-	CreatedAt string          `json:"created_at"`
+	ID           int     `json:"id"`
+	Name         string  `json:"name"`
+	Token        string  `json:"-"`
+	Capabilities RawJSON `json:"capabilities"`
+	Platform     string  `json:"platform"`
+	Hostname     string  `json:"hostname"`
+	Version      string  `json:"version"`
+	Tags         RawJSON `json:"tags"`
+	Status       string  `json:"status"`
+	LastSeen     string  `json:"last_seen"`
+	CreatedAt    string  `json:"created_at"`
 }
 
 type NodeJob struct {
-	ID         int             `json:"id"`
-	NodeID     int             `json:"node_id"`
-	TaskID     int             `json:"task_id"`
-	Tool       string          `json:"tool"`
-	Args       RawJSON  `json:"args"`
-	Status     string          `json:"status"`
-	Result     string          `json:"result"`
-	Error      string          `json:"error"`
-	CreatedAt  string          `json:"created_at"`
-	FinishedAt any             `json:"finished_at"`
+	ID         int     `json:"id"`
+	NodeID     int     `json:"node_id"`
+	TaskID     int     `json:"task_id"`
+	Tool       string  `json:"tool"`
+	Args       RawJSON `json:"args"`
+	Status     string  `json:"status"`
+	Result     string  `json:"result"`
+	Error      string  `json:"error"`
+	CreatedAt  string  `json:"created_at"`
+	FinishedAt any     `json:"finished_at"`
 }

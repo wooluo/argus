@@ -26,7 +26,8 @@ func (a *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		rows, err = a.DB.Query(q + ` ORDER BY id DESC`)
 	}
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	defer rows.Close()
 	out := []store.Task{}
@@ -34,7 +35,8 @@ func (a *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		var t store.Task
 		var started, finished sql.NullString
 		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Status, &t.Mode, &t.CurrentStage, &t.Tokens, &t.StagesDone, &t.Message, &t.CreatedAt, &started, &finished); err != nil {
-			respondErr(w, 500, err.Error()); return
+			respondErr(w, 500, err.Error())
+			return
 		}
 		t.StartedAt = nilStr(started)
 		t.FinishedAt = nilStr(finished)
@@ -46,17 +48,20 @@ func (a *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 func (a *API) GetTask(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	var t store.Task
 	var started, finished sql.NullString
 	err = a.DB.QueryRow(`SELECT id,project_id,status,mode,current_stage,tokens,stages_done,message,created_at,started_at,finished_at FROM tasks WHERE id=?`, id).
 		Scan(&t.ID, &t.ProjectID, &t.Status, &t.Mode, &t.CurrentStage, &t.Tokens, &t.StagesDone, &t.Message, &t.CreatedAt, &started, &finished)
 	if errors.Is(err, sql.ErrNoRows) {
-		respondErr(w, 404, "task not found"); return
+		respondErr(w, 404, "task not found")
+		return
 	}
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	t.StartedAt = nilStr(started)
 	t.FinishedAt = nilStr(finished)
@@ -67,22 +72,27 @@ func (a *API) GetTask(w http.ResponseWriter, r *http.Request) {
 func (a *API) StartTask(w http.ResponseWriter, r *http.Request) {
 	pid, err := pathID(r)
 	if err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	var authz int
 	var scope store.RawJSON
 	err = a.DB.QueryRow(`SELECT authorized,scope FROM projects WHERE id=?`, pid).Scan(&authz, &scope)
 	if errors.Is(err, sql.ErrNoRows) {
-		respondErr(w, 404, "project not found"); return
+		respondErr(w, 404, "project not found")
+		return
 	}
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	if authz != 1 {
-		respondErr(w, 400, "project not authorized"); return
+		respondErr(w, 400, "project not authorized")
+		return
 	}
 	if len(scope) == 0 || string(scope) == "[]" || string(scope) == "null" {
-		respondErr(w, 400, "project scope empty"); return
+		respondErr(w, 400, "project scope empty")
+		return
 	}
 
 	var req struct {
@@ -93,13 +103,15 @@ func (a *API) StartTask(w http.ResponseWriter, r *http.Request) {
 		req.Mode = "autonomous"
 	}
 	if req.Mode != "autonomous" && req.Mode != "staged" {
-		respondErr(w, 422, "mode must be autonomous|staged"); return
+		respondErr(w, 422, "mode must be autonomous|staged")
+		return
 	}
 
 	res, err := a.DB.Exec(`INSERT INTO tasks(project_id,mode,status,current_stage) VALUES(?,?,?,?)`,
 		pid, req.Mode, "pending", "")
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	id, _ := res.LastInsertId()
 	// Runner 若存在则异步驱动（v0: pipeline 由 runner 接口注入）
@@ -116,7 +128,8 @@ func (a *API) getTaskByID(w http.ResponseWriter, id int64) {
 	err := a.DB.QueryRow(`SELECT id,project_id,status,mode,current_stage,tokens,stages_done,message,created_at,started_at,finished_at FROM tasks WHERE id=?`, id).
 		Scan(&t.ID, &t.ProjectID, &t.Status, &t.Mode, &t.CurrentStage, &t.Tokens, &t.StagesDone, &t.Message, &t.CreatedAt, &started, &finished)
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	t.StartedAt = nilStr(started)
 	t.FinishedAt = nilStr(finished)
@@ -127,24 +140,29 @@ func (a *API) getTaskByID(w http.ResponseWriter, id int64) {
 func (a *API) StopTask(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	var status string
 	if err := a.DB.QueryRow(`SELECT status FROM tasks WHERE id=?`, id).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			respondErr(w, 404, "task not found"); return
+			respondErr(w, 404, "task not found")
+			return
 		}
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	if status != "running" && status != "pending" {
-		respondErr(w, 400, "task not running"); return
+		respondErr(w, 400, "task not running")
+		return
 	}
 	if a.Runner != nil {
 		a.Runner.Stop(int(id))
 	}
 	_, err = a.DB.Exec(`UPDATE tasks SET status='stopped', finished_at=? WHERE id=?`, store.Now(), id)
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	a.Bus.Publish("task_stopped", map[string]any{"id": id})
 	respondJSON(w, 200, map[string]bool{"ok": true})
@@ -164,14 +182,16 @@ func (a *API) ListAgentLogs(w http.ResponseWriter, r *http.Request) {
 		rows, err = a.DB.Query(`SELECT id,task_id,stage,type,tool,args,content,result_summary,created_at FROM agent_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	}
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	defer rows.Close()
 	out := []store.AgentLog{}
 	for rows.Next() {
 		var l store.AgentLog
 		if err := rows.Scan(&l.ID, &l.TaskID, &l.Stage, &l.Type, &l.Tool, &l.Args, &l.Content, &l.ResultSummary, &l.CreatedAt); err != nil {
-			respondErr(w, 500, err.Error()); return
+			respondErr(w, 500, err.Error())
+			return
 		}
 		out = append(out, l)
 	}

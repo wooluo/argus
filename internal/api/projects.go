@@ -38,7 +38,8 @@ func pathID(r *http.Request) (int64, error) {
 func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.DB.Query(`SELECT id,name,description,scope,authorized,allow_hosts,created_at FROM projects ORDER BY id DESC`)
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	defer rows.Close()
 	out := []store.Project{}
@@ -46,7 +47,8 @@ func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 		var p store.Project
 		var auth int
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Scope, &auth, &p.AllowHosts, &p.CreatedAt); err != nil {
-			respondErr(w, 500, err.Error()); return
+			respondErr(w, 500, err.Error())
+			return
 		}
 		p.Authorized = auth == 1
 		out = append(out, p)
@@ -63,10 +65,12 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		Authorized  *bool           `json:"authorized"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	if req.Name == "" {
-		respondErr(w, 422, "name required"); return
+		respondErr(w, 422, "name required")
+		return
 	}
 	if len(req.Scope) == 0 {
 		req.Scope = json.RawMessage("[]")
@@ -81,7 +85,8 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	res, err := a.DB.Exec(`INSERT INTO projects(name,description,scope,allow_hosts,authorized) VALUES(?,?,?,?,?)`,
 		req.Name, req.Description, string(req.Scope), string(req.AllowHosts), authz)
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	id, _ := res.LastInsertId()
 	a.Bus.Publish("project_created", map[string]any{"id": id, "name": req.Name})
@@ -94,10 +99,12 @@ func (a *API) getProject(w http.ResponseWriter, id int64) {
 	err := a.DB.QueryRow(`SELECT id,name,description,scope,authorized,allow_hosts,created_at FROM projects WHERE id=?`, id).
 		Scan(&p.ID, &p.Name, &p.Description, &p.Scope, &auth, &p.AllowHosts, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		respondErr(w, 404, "project not found"); return
+		respondErr(w, 404, "project not found")
+		return
 	}
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	p.Authorized = auth == 1
 	respondJSON(w, 200, p)
@@ -106,7 +113,8 @@ func (a *API) getProject(w http.ResponseWriter, id int64) {
 func (a *API) GetProject(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	a.getProject(w, id)
 }
@@ -114,7 +122,8 @@ func (a *API) GetProject(w http.ResponseWriter, r *http.Request) {
 func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	var req struct {
 		Name        *string         `json:"name"`
@@ -124,15 +133,18 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		Authorized  *bool           `json:"authorized"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondErr(w, 422, err.Error()); return
+		respondErr(w, 422, err.Error())
+		return
 	}
 	cur, err := a.DB.Query(`SELECT name,description,scope,allow_hosts,authorized FROM projects WHERE id=?`, id)
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	defer cur.Close()
 	if !cur.Next() {
-		respondErr(w, 404, "project not found"); return
+		respondErr(w, 404, "project not found")
+		return
 	}
 	var name, desc string
 	var scope, allow store.RawJSON
@@ -158,7 +170,8 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := a.DB.Exec(`UPDATE projects SET name=?,description=?,scope=?,allow_hosts=?,authorized=? WHERE id=?`,
 		name, desc, string(scope), string(allow), boolInt(authBool), id); err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	a.getProject(w, id)
 }
@@ -166,15 +179,18 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
-		respondErr(w, 400, err.Error()); return
+		respondErr(w, 400, err.Error())
+		return
 	}
 	res, err := a.DB.Exec(`DELETE FROM projects WHERE id=?`, id)
 	if err != nil {
-		respondErr(w, 500, err.Error()); return
+		respondErr(w, 500, err.Error())
+		return
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		respondErr(w, 404, "project not found"); return
+		respondErr(w, 404, "project not found")
+		return
 	}
 	a.Bus.Publish("project_deleted", map[string]any{"id": id})
 	respondJSON(w, 200, map[string]bool{"ok": true})

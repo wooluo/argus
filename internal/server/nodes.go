@@ -48,7 +48,8 @@ func genNodeToken() string {
 func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at FROM nodes ORDER BY id`)
 	if err != nil {
-		jerr(w, 500, err.Error()); return
+		jerr(w, 500, err.Error())
+		return
 	}
 	defer rows.Close()
 	type nodeRow struct {
@@ -65,7 +66,8 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var v nodeRow
 		if err := rows.Scan(&v.ID, &v.Name, &v.Platform, &v.Hostname, &v.Version, &v.Status, &v.LastSeen, &v.CreatedAt); err != nil {
-			jerr(w, 500, err.Error()); return
+			jerr(w, 500, err.Error())
+			return
 		}
 		out = append(out, v)
 	}
