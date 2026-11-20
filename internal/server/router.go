@@ -66,6 +66,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/findings", a.ListFindings)
 		apig.Get("/api/reports", a.ListReports)
 		apig.Patch("/api/findings/{id}", a.UpdateFindingStatus)
+		apig.Post("/api/findings/{id}/retest", a.RetestFinding)
 		apig.Get("/api/agent-logs", a.ListAgentLogs)
 
 		// Settings（设置页；auth 写后热更新）
