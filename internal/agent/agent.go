@@ -41,6 +41,8 @@ type Agent struct {
 	// recentCalls 近 16 次工具调用签名（同参重复直接拦截）
 	recentCalls map[string]string // 签名 → 上次结果摘要
 	callOrder   []string          // 签名时效（LRU 裁剪）
+	digest  []string // 工作纪要（上下文压缩后的攻击链记忆）
+	nudges  int      // 过早收工纠正次数（上限 3）
 	// resHist 响应收敛检测：归一化指纹滑窗 3 次，全同即注入换思路提示
 	resHist  [3]string
 	resHistN int
@@ -83,6 +85,10 @@ func (a *Agent) Run(ctx context.Context, system, brief string) (string, error) {
 	}
 
 	for a.step < a.opts.MaxSteps {
+		// 操作员运行中情报注入（高优先级，立即采纳）
+		if intelMsgs := drainIntel(a.ctx); len(intelMsgs) > 0 {
+			messages = append(messages, intelMsgs...)
+		}
 		resp, err := a.client.Chat(ctx, messages, specs, 0.2)
 		if err != nil {
 			return "", fmt.Errorf("LLM 调用失败: %w", err)
@@ -93,8 +99,23 @@ func (a *Agent) Run(ctx context.Context, system, brief string) (string, error) {
 		choice := resp.Choices[0]
 		msg := choice.Message
 
-		// 无工具调用 → 最终输出
+		// 无工具调用 → 最终输出（过早收工检测：未产出报告且步数 <60% 时 nudge 继续）
 		if len(msg.ToolCalls) == 0 {
+			if msg.Content != "" {
+				a.noteThought(msg.Content)
+			}
+			if nudge := a.prematureFinish(msg.Content, a.step, a.opts.MaxSteps, a.nudges); nudge != "" {
+				a.nudges++
+				if a.ctx != nil && a.ctx.Reporter != nil {
+					a.ctx.Reporter.Log(ctx, "agent", a.opts.Stage, fmt.Sprintf(
+						"⚠ 检测到过早收工（第 %d/%d 步），已要求继续（第 %d 次）",
+						a.step, a.opts.MaxSteps, a.nudges))
+				}
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: msg.Content},
+					llm.Message{Role: "user", Content: nudge})
+				continue
+			}
 			return msg.Content, nil
 		}
 
@@ -120,8 +141,8 @@ func (a *Agent) Run(ctx context.Context, system, brief string) (string, error) {
 			}
 		}
 
-		// 上下文裁剪：保 system + 尾部 ContextLimit 条
-		messages = trimMessages(messages, a.opts.ContextLimit)
+		// 上下文滚动压缩：system+任务书+工作纪要+近期对话（攻击链压缩后不丢）
+		messages = a.compactMessages(messages, a.opts.ContextLimit)
 	}
 	// 步数耗尽：返回已积累的内容（pipeline 侧模板生成报告兜底）
 	if a.ctx != nil && a.ctx.Reporter != nil {
@@ -168,6 +189,8 @@ func (a *Agent) executeOne(ctx context.Context, call llm.ToolCall, byName map[st
 			a.callOrder = a.callOrder[1:]
 		}
 	}
+	// 工作纪要：成功/失败/拦截均记一行（上下文压缩后据此重建攻击链）
+	a.noteDigest(call.Function.Name, args, err == nil, out)
 	if a.ctx != nil && a.ctx.Reporter != nil {
 		a.ctx.Reporter.Log(ctx, "agent", a.opts.Stage, fmt.Sprintf(
 			"[%d] %s(%s) → %s (%.1fs)",
