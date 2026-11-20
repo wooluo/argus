@@ -1,5 +1,8 @@
 package tools
 
+// infraDNS 公共 DNS/本机白名单：dig @8.8.8.8 等是查询基础设施不是攻击目标，
+// 拦截它们只会迫使 Agent 放弃被动情报手段（AutoPentent _INFRA_IPS 同义）。
+
 import (
 	"context"
 	"encoding/base64"
@@ -21,6 +24,7 @@ import (
 // cmdBlacklist 命令黑名单（对应 kali_exec._BLACKLIST / run_script._CODE_BLACKLIST）。
 // rm 系不在此表：RE2 无负向前瞻，rm -rf 的放行/拦截由 rmrfBlocked 单独处理。
 var cmdBlacklist = []struct {
+
 	pat *regexp.Regexp
 	why string
 }{
@@ -120,7 +124,7 @@ func (KaliExecTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 	}
 	// 范围尽力校验：IPv4 字面量与 URL host
 	for _, ip := range ipv4Re.FindAllString(command, -1) {
-		if ip == "127.0.0.1" || ip == "0.0.0.0" {
+		if infraDNS[ip] {
 			continue
 		}
 		if !tc.Scope.CheckHost(ip) {
@@ -475,3 +479,13 @@ func (ExploitdbFetchTool) Execute(ctx context.Context, args map[string]any, tc *
 }
 
 func init() { Register(ExploitdbFetchTool{}) }
+
+// infraDNS 公共 DNS/本机白名单：dig @8.8.8.8 等是查询基础设施不是攻击目标。
+var infraDNS = map[string]bool{
+	"127.0.0.1": true, "0.0.0.0": true,
+	"8.8.8.8": true, "8.8.4.4": true,
+	"1.1.1.1": true, "1.0.0.1": true,
+	"9.9.9.9": true, "149.112.112.112": true,
+	"114.114.114.114": true, "223.5.5.5": true, "119.29.29.29": true,
+	"208.67.222.222": true,
+}

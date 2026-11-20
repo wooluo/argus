@@ -17,6 +17,7 @@ import (
 
 // Options Agent 运行参数。
 type Options struct {
+	BudgetBase int // 动态预算基准（0=不启用上调）
 	TaskID        int64
 	Stage         string // hunt / recon / mapping / vulnscan / verify / report
 	ContextLimit  int    // 上下文裁剪保留的消息条数（原版 40）
