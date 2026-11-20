@@ -44,10 +44,12 @@ func (DirBruteTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 	}
 	cl := &http.Client{
 		Timeout: 10 * time.Second,
+		Transport: ProxyTransport(TargetProxy()), // 测试流量代理（WAF 规避，显式即全量）
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // 不跟随
 		},
 	}
+	pacer := NewPacer() // AIMD：拦截响应自动退避
 	var mu sync.Mutex
 	type hit struct {
 		URL    string `json:"url"`
@@ -73,10 +75,12 @@ func (DirBruteTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 				return
 			}
 			req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Argus/0.1)")
+			pacer.Wait()
 			resp, err := cl.Do(req)
 			if err != nil {
 				return
 			}
+			pacer.Feedback(resp.StatusCode)
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			_ = resp.Body.Close()
 			if interestingStatuses[resp.StatusCode] {

@@ -447,6 +447,7 @@ func init() { Register(HttpFetchTool{}) }
 // fetchRawFollow 跟随重定向的抓取（最多 10 跳），返回 (状态, 体, err)。
 func fetchRawFollow(ctx context.Context, method, u string, headers map[string]string, body string) (int, string, error) {
 	cl := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+		Proxy:     proxyFunc(TargetProxy()),
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}}
 	req, err := http.NewRequestWithContext(ctx, method, u, strings.NewReader(body))
@@ -474,6 +475,7 @@ func fetchFollowCapture(ctx context.Context, method, u string, headers map[strin
 	cl := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
+			Proxy:     proxyFunc(TargetProxy()),
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

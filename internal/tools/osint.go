@@ -69,7 +69,8 @@ func (OsintTool) Execute(ctx context.Context, args map[string]any, tc *Context) 
 		}), nil
 	case "ct_logs":
 		u := "https://crt.sh/?q=%." + domain + "&output=json"
-		cl := &http.Client{Timeout: 40 * time.Second}
+		cl := &http.Client{Timeout: 40 * time.Second,
+			Transport: ProxyTransport(OutProxyFor("https://crt.sh"))}
 		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 		req.Header.Set("User-Agent", "Mozilla/5.0")
 		resp, err := cl.Do(req)

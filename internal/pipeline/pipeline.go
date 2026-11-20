@@ -6,6 +6,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -69,8 +70,10 @@ type memReporter struct {
 	sentF   int
 	sentA   int
 	sentL   int
-	onFlush func(Brief, Result) // 可选：增量上报（只带新增条目）
-	brief   Brief
+	onFlush   func(Brief, Result) // 可选：增量上报（只带新增条目）
+	brief     Brief
+	knowledge []knowledgeEntry // 会话内知识（SaveKnowledge 入此，供 SearchKnowledge）
+	kSeq      int
 }
 
 func (m *memReporter) flushLocked() {
@@ -158,16 +161,99 @@ func (m *memReporter) SaveEvidence(_ context.Context, typ, content string, meta 
 func (m *memReporter) SaveKnowledge(_ context.Context, title, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.kSeq++
+	m.knowledge = append(m.knowledge, knowledgeEntry{
+		id: fmt.Sprintf("k%d", m.kSeq), title: title, content: content})
 	m.res.Logs = append(m.res.Logs, LogItem{Stage: "knowledge", Tool: "knowledge_save",
 		Content: title + "\n" + tools.Truncate(content, 4000)})
 	m.flushLocked()
 	return nil
 }
 
-// SearchKnowledge 节点无本地知识库，返回空（原版知识检索跨任务能力由 server 侧后续补）。
-func (m *memReporter) SearchKnowledge(_ context.Context, _ string, _ int) []map[string]any {
-	return nil
+// SearchKnowledge 会话内知识检索（本任务沉淀的条目，BM25 简化打分：
+// 词频×逆文档频率；跨任务知识由 server 在任务书注入 Brief，不走此路径）。
+func (m *memReporter) SearchKnowledge(_ context.Context, query string, limit int) []map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.knowledge) == 0 || strings.TrimSpace(query) == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	// 分词：英文词 + 中文单字 bigram（与原版 BM25 一致）
+	tokens := tokenize(query)
+	type scored struct {
+		s   float64
+		kv  knowledgeEntry
+	}
+	var out []scored
+	for _, kv := range m.knowledge {
+		docT := tokenize(kv.title + " " + kv.content)
+		tf := map[string]int{}
+		for _, t := range docT {
+			tf[t]++
+		}
+		score := 0.0
+		for _, q := range tokens {
+			if c, ok := tf[q]; ok && c > 0 {
+				idf := 1.0 + float64(len(m.knowledge))/float64(c+1)
+				score += idf * float64(c)
+			}
+		}
+		if score > 0 {
+			out = append(out, scored{score, kv})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].s > out[j].s })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	res := make([]map[string]any, 0, len(out))
+	for _, o := range out {
+		res = append(res, map[string]any{
+			"id": o.kv.id, "snippet": tools.Truncate(o.kv.title+"\n"+o.kv.content, 600),
+			"score": o.s,
+		})
+	}
+	return res
 }
+
+// knowledgeEntry 会话内知识条目。
+type knowledgeEntry struct {
+	id, title, content string
+}
+
+// tokenize 中英混合分词：>=2 字符的英数词 + 相邻汉字 bigram。
+func tokenize(s string) []string {
+	var toks []string
+	var word []rune
+	flush := func() {
+		if len(word) >= 2 {
+			toks = append(toks, string(word))
+		}
+		word = word[:0]
+	}
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_':
+			word = append(word, r)
+		default:
+			flush()
+		}
+	}
+	flush()
+	// 汉字 bigram
+	runes := []rune(s)
+	for i := 0; i+1 < len(runes); i++ {
+		if isHan(runes[i]) && isHan(runes[i+1]) {
+			toks = append(toks, string(runes[i:i+2]))
+		}
+	}
+	return toks
+}
+
+func isHan(r rune) bool { return r >= 0x4e00 && r <= 0x9fff }
 
 func (m *memReporter) Log(_ context.Context, actor, stage, message string) {
 	m.mu.Lock()
@@ -188,4 +274,11 @@ func (m *memReporter) LLMDesc() string {
 		host = "?"
 	}
 	return m.brief.LLM.Model + " @ " + host
+}
+
+// assetCount 会话内已发现资产数（自适应步数预算用）。
+func (m *memReporter) assetCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.res.Assets)
 }

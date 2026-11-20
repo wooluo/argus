@@ -2,6 +2,7 @@
 package pipeline
 
 import (
+	"math"
 	"context"
 	"fmt"
 	"strings"
@@ -14,7 +15,10 @@ import (
 // runAutonomous 单会话全工具自主执行；Agent 最终输出若已是报告直接采用。
 func runAutonomous(ctx context.Context, b Brief, tc *tools.Context, rep *memReporter,
 	res *Result, client *llm.Client) {
-	maxSteps := 120
+	// 自适应步数预算（移植自 AutoPentent：对数缩放，边际收益递减）：
+	// base × max(1, log2(1+资产数)/6)，下限 60 上限 300
+	base := 120
+	maxSteps := adaptiveSteps(base, rep.assetCount())
 	rep.Log(ctx, "system", "hunt", fmt.Sprintf(
 		"任务启动 · 授权范围: %s · 模式: 自主（步数预算 %d）· 模型: %s",
 		tc.Scope.Describe(), maxSteps, rep.LLMDesc()))
@@ -109,4 +113,22 @@ func autonomousBrief(b Brief) (system, brief string) {
 攻击面 → 漏洞汇总表（编号/名称/严重度/位置/状态）→ 漏洞详情（原理/证据/
 复现步骤/修复建议）→ 总结与整体建议）。该报告将直接交付委托方，请专业、严谨、可复现。`
 	return system, brief
+}
+
+// adaptiveSteps 对数缩放步数预算：资产 50≈base，6678≈base×2.1；夹在 [60,300]。
+func adaptiveSteps(base, assets int) int {
+	if assets <= 0 {
+		return base
+	}
+	f := math.Log2(1+float64(assets)) / 6
+	if f < 1 {
+		f = 1
+	}
+	n := int(float64(base)*f + 0.5)
+	if n < 60 {
+		n = 60
+	} else if n > 300 {
+		n = 300
+	}
+	return n
 }

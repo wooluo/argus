@@ -59,7 +59,8 @@ func (FofaTool) Execute(ctx context.Context, args map[string]any, tc *Context) (
 		url.QueryEscape(email), url.QueryEscape(key), url.QueryEscape(qb), size)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second,
+		Transport: ProxyTransport(OutProxyFor("https://fofa.info"))}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", Errorf("FOFA 请求失败: %v", err)
