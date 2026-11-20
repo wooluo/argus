@@ -54,8 +54,6 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 
 		// Tasks
 		apig.Route("/api/tasks", func(tr chi.Router) {
-			apig.Get("/api/system/logs", a.SystemLogs)
-		apig.Post("/api/nodes/deploy", nodeAPI.DeployNode)
 			tr.Get("/", a.ListTasks)
 			tr.Route("/{id}", func(trr chi.Router) {
 				trr.Get("/", a.GetTask)
@@ -118,9 +116,20 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Put("/api/poclib/repos", a.PutPocRepos)
 		apig.Post("/api/poclib/sync", a.PoclibSync)
 
-		// Dashboard 域（蓝本 api/dashboard.py 的 stats 部分；approvals/graph/logs/sources 见 TODO）
+		// Dashboard 域（蓝本 api/dashboard.py）
 		apig.Get("/api/dashboard/stats", a.GetDashboard)
-		apig.Get("/api/stream", a.GetStream)
+		apig.Get("/api/system/logs", a.SystemLogs)
+
+		// Approvals 域（蓝本 api/approvals.py：高危工具调用审批）
+		apig.Route("/api/approvals", func(ar chi.Router) {
+			ar.Get("/", a.ListApprovals)
+			ar.Get("/config", a.GetApprovalConfig)
+			ar.Put("/config", a.PutApprovalConfig)
+			ar.Post("/{id}/decide", a.DecideApproval)
+		})
+
+		// SSH 引导式节点部署（管理面；节点网 register/heartbeat 在下方独立鉴权域）
+		apig.Post("/api/nodes/deploy", nodeAPI.DeployNode)
 
 		// Kali 域（蓝本 api/kali.py）
 		apig.Get("/api/kali/hosts", a.ListKaliHosts)
