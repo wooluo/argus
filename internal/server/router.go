@@ -54,6 +54,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 
 		// Tasks
 		apig.Route("/api/tasks", func(tr chi.Router) {
+			apig.Get("/system/logs", a.SystemLogs)
 			tr.Get("/", a.ListTasks)
 			tr.Route("/{id}", func(trr chi.Router) {
 				trr.Get("/", a.GetTask)

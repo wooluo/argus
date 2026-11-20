@@ -59,6 +59,11 @@ func autonomousBrief(b Brief) (system, brief string) {
 			"- IP/网段目标: %s（网段先做存活发现）", strings.Join(ips, ", ")))
 	}
 
+	knowledgeBlock := ""
+	if strings.TrimSpace(b.Knowledge) != "" {
+		knowledgeBlock = b.Knowledge
+	}
+
 	rulesBlock := ""
 	if strings.TrimSpace(b.Description) != "" {
 		d := b.Description
@@ -72,7 +77,7 @@ func autonomousBrief(b Brief) (system, brief string) {
 
 ## 目标
 对以下授权范围完成系统性的渗透测试，找到真实存在的问题并给出专业报告。
-` + rulesBlock + `
+` + rulesBlock + knowledgeBlock + `
 ## 环境情报（供参考，不是步骤指令）
 ` + strings.Join(envLines, "\n") + `
 - 会话工具：web_login 可登录站点（自动处理表单/CSRF），http_fetch 带会话访问任意页面——有凭据时优先登录并系统测试认证后的每个功能模块

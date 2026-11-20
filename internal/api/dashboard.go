@@ -5,6 +5,8 @@ import (
 	"math"
 	"net/http"
 	"time"
+	"strconv"
+	"database/sql"
 )
 
 // ============ Dashboard 域（蓝本 api/dashboard.py dashboard_stats） ============
@@ -258,4 +260,51 @@ func (a *API) GetDashboard(w http.ResponseWriter, r *http.Request) {
 		Activity:       activity,
 		RecentFindings: findings,
 	})
+}
+
+
+// SystemLogs GET /api/system/logs?limit=200 — 跨项目审计日志（蓝本 system_logs 路由）。
+func (a *API) SystemLogs(w http.ResponseWriter, r *http.Request) {
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	rows, err := a.DB.Query(`
+		SELECT l.id, l.task_id, l.stage, l.tool, l.content, l.created_at,
+		       t.project_id, p.name
+		FROM agent_logs l
+		LEFT JOIN tasks t ON t.id = l.task_id
+		LEFT JOIN projects p ON p.id = t.project_id
+		ORDER BY l.id DESC LIMIT ?`, limit)
+	if err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	type logItem struct {
+		ID        int64  `json:"id"`
+		TaskID    int64  `json:"task_id"`
+		Stage     string `json:"stage"`
+		Tool      string `json:"tool"`
+		Content   string `json:"content"`
+		CreatedAt string `json:"created_at"`
+		ProjectID int64  `json:"project_id"`
+		Project   string `json:"project"`
+	}
+	out := []logItem{}
+	for rows.Next() {
+		var it logItem
+		var stage, tool, content sql.NullString
+		var projID sql.NullInt64
+		var proj sql.NullString
+		if err := rows.Scan(&it.ID, &it.TaskID, &stage, &tool, &content, &it.CreatedAt, &projID, &proj); err != nil {
+			continue
+		}
+		it.Stage, it.Tool, it.Content = stage.String, tool.String, content.String
+		it.ProjectID, it.Project = projID.Int64, proj.String
+		out = append(out, it)
+	}
+	respondJSON(w, 200, out)
 }

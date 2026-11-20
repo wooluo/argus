@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -88,6 +89,21 @@ func (a *Agent) Run(ctx context.Context, system, brief string) (string, error) {
 		// 操作员运行中情报注入（高优先级，立即采纳）
 		if intelMsgs := drainIntel(a.ctx); len(intelMsgs) > 0 {
 			messages = append(messages, intelMsgs...)
+		}
+		// 预算动态上调：每 25 步按已发现资产量重算（发现远超初始估计时放宽）
+		if a.step > 0 && a.step%25 == 0 && a.opts.BudgetBase > 0 {
+			if snap := a.ctx; snap != nil && snap.Reporter != nil {
+				if sc, ok := snap.Reporter.(interface{ AssetCount() int }); ok {
+					need := budgetFor(a.opts.BudgetBase, sc.AssetCount())
+					if need > a.opts.MaxSteps {
+						if a.ctx.Reporter != nil {
+							a.ctx.Reporter.Log(ctx, "agent", a.opts.Stage, fmt.Sprintf(
+								"📈 自适应预算上调: 步数 %d → %d", a.opts.MaxSteps, need))
+						}
+						a.opts.MaxSteps = need
+					}
+				}
+			}
 		}
 		resp, err := a.client.Chat(ctx, messages, specs, 0.2)
 		if err != nil {
@@ -260,4 +276,22 @@ func resultSummary(out string, err error) string {
 		return out[:80] + "…"
 	}
 	return out
+}
+
+// budgetFor 对数缩放步数预算（与 pipeline.adaptiveSteps 同式，agent 运行中上调用）。
+func budgetFor(base, assets int) int {
+	if assets <= 0 {
+		return base
+	}
+	f := math.Log2(1+float64(assets)) / 6
+	if f < 1 {
+		f = 1
+	}
+	n := int(float64(base)*f + 0.5)
+	if n < 60 {
+		n = 60
+	} else if n > 300 {
+		n = 300
+	}
+	return n
 }

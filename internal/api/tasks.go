@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/wooluo/argus/internal/store"
+	"fmt"
 )
 
 // ================= Tasks =================
@@ -96,7 +97,8 @@ func (a *API) StartTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Mode string `json:"mode"` // autonomous/staged
+		Mode         string `json:"mode"`         // autonomous/staged
+		ContinueFrom int64  `json:"continue_from"` // 断点续测：携带指定任务的成果
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Mode == "" {
@@ -107,8 +109,12 @@ func (a *API) StartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := a.DB.Exec(`INSERT INTO tasks(project_id,mode,status,current_stage) VALUES(?,?,?,?)`,
-		pid, req.Mode, "pending", "")
+	contNote := ""
+	if req.ContinueFrom > 0 {
+		contNote = fmt.Sprintf("[continue_from=%d]", req.ContinueFrom)
+	}
+	res, err := a.DB.Exec(`INSERT INTO tasks(project_id,mode,status,current_stage,message) VALUES(?,?,?,?,?)`,
+		pid, req.Mode, "pending", "", contNote)
 	if err != nil {
 		respondErr(w, 500, err.Error())
 		return

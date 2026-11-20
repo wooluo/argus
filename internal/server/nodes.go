@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 
+	"github.com/wooluo/argus/internal/config"
 	"github.com/wooluo/argus/internal/auth"
 	"github.com/wooluo/argus/internal/store"
 )
@@ -166,7 +167,63 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		Scan(&p.ID, &p.Name, &p.Description, &p.Scope, &p.Authorized, &p.AllowHosts, &p.CreatedAt)
 	_ = n.DB.QueryRow(`SELECT value FROM settings WHERE key='llm'`).Scan(&llmCfg)
 
-	jout(w, 200, map[string]any{"task": t, "project": p, "llm": json.RawMessage(llmCfg)})
+	// 知识注入：项目已有知识库条目随任务下发（node 侧拼入任务书，跨任务经验复用）
+	knowledgeBlock := n.buildKnowledgeBlock()
+
+	jout(w, 200, map[string]any{"task": t, "project": p, "llm": json.RawMessage(llmCfg),
+		"knowledge": knowledgeBlock})
+}
+
+// buildKnowledgeBlock 启用状态的知识条目（≤5 条 × 截断），注入任务书（蓝本 _knowledge_block）。
+func (n *NodeAPI) buildKnowledgeBlock() string {
+	dir := filepath.Join(config.Load().DataDir, "knowledge")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var meta []map[string]any
+	_ = json.Unmarshal([]byte(store.GetSetting(n.DB, "knowledge")), &meta)
+	enabled := map[string]bool{}
+	titles := map[string]string{}
+	for _, m := range meta {
+		id, _ := m["id"].(string)
+		title, _ := m["title"].(string)
+		if id != "" {
+			titles[id] = title
+			if on, ok := m["enabled"].(bool); !ok || on {
+				enabled[id] = true
+			}
+		}
+	}
+	var parts []string
+	count := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".md") || count >= 5 {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".md")
+		if !enabled[id] {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		title := titles[id]
+		if title == "" {
+			title = id
+		}
+		content := string(b)
+		if len(content) > 1500 {
+			content = content[:1500]
+		}
+		parts = append(parts, fmt.Sprintf("### %s\n%s", title, content))
+		count++
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "## 知识库（历史任务沉淀，按需应用）\n\n" + strings.Join(parts, "\n\n") + "\n"
 }
 
 // ReportResult: POST /api/nodes/result — 节点执行完毕回传 findings/assets/logs。
@@ -338,4 +395,34 @@ func nilOrString(ns sql.NullString) any {
 		return ns.String
 	}
 	return nil
+}
+
+
+// pushNotify 任务完成/失败时向配置的 webhook 推送 JSON（蓝本 _finish → push_event）。
+func (n *NodeAPI) pushNotify(taskID int64, status, message string) {
+	cfg := store.GetSetting(n.DB, "notify")
+	if cfg == "" {
+		return
+	}
+	var c struct {
+		Enabled    bool   `json:"enabled"`
+		WebhookURL string `json:"webhook_url"`
+	}
+	_ = json.Unmarshal([]byte(cfg), &c)
+	if !c.Enabled || c.WebhookURL == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]any{
+		"event": "task_" + status, "title": fmt.Sprintf("任务 #%d %s", taskID, status),
+		"body": message, "time": time.Now().UTC().Format(time.RFC3339)})
+	go func() {
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, _ := http.NewRequest(http.MethodPost, c.WebhookURL,
+			strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
 }

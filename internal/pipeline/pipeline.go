@@ -23,6 +23,7 @@ type Brief struct {
 	ProjectID   int64        `json:"project_id"`
 	ProjectName string       `json:"project_name"`
 	Description string       `json:"description"`
+	Knowledge   string       `json:"knowledge"`   // server 注入的知识库块（跨任务经验）
 	Scope       []scope.Rule `json:"scope"`
 	AllowHosts  []string     `json:"allow_hosts"`
 	LLM         llm.Config   `json:"llm"`

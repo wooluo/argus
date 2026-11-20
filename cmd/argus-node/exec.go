@@ -31,6 +31,7 @@ type pollTask struct {
 		Model   string `json:"model"`
 		Proxy   string `json:"proxy"`
 	} `json:"llm"`
+	Knowledge string `json:"knowledge"` // server 注入的知识库块
 }
 
 // buildBrief 从 Poll 响应组装 pipeline.Brief。
@@ -57,6 +58,7 @@ func (p *pollTask) buildBrief() pipeline.Brief {
 	b.LLM.APIKey = p.LLM.APIKey
 	b.LLM.Model = p.LLM.Model
 	b.LLM.Proxy = p.LLM.Proxy
+	b.Knowledge = p.Knowledge
 	return b
 }
 
