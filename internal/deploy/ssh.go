@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -58,24 +60,34 @@ func Deploy(cfg SSHConfig) Result {
 	}
 	defer session.Close()
 
-	// 2. 检查远端环境
+	// 2. 检测远端系统与架构
 	var out bytes.Buffer
 	session.Stdout = &out
 	if err := session.Run("uname -s && uname -m"); err != nil {
 		return fail(fmt.Sprintf("无法执行命令: %v", err))
 	}
-	arch := strings.TrimSpace(out.String())
-	if !strings.Contains(arch, "Linux") {
-		return fail("目标不是 Linux 系统: " + arch)
+	uname := strings.TrimSpace(out.String())
+	if !strings.Contains(uname, "Linux") {
+		return fail("目标不是 Linux 系统: " + uname)
 	}
-	step("目标系统: " + strings.ReplaceAll(arch, "\n", " "))
+	// 解析架构（uname -m 第二行）
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	remoteArch := ""
+	if len(lines) >= 2 {
+		remoteArch = strings.TrimSpace(lines[1])
+	}
+	step("目标: Linux " + remoteArch)
 
-	// 3. 确定目标架构对应的二进制
-	// 本地 binary_path 已经是对应架构的（调用方选好），这里只做存在性检查
-	if _, err := os.Stat(cfg.BinaryPath); err != nil {
-		return fail("本机 argus-node 二进制不存在: " + cfg.BinaryPath)
+	// 3. 按远端架构自动选择二进制
+	binaryPath := pickBinary(remoteArch)
+	if binaryPath == "" {
+		return fail(fmt.Sprintf(
+			"本机没有 %s 架构的 argus-node 二进制。请先交叉编译：\n"+
+				"  CGO_ENABLED=0 GOOS=linux GOARCH=%s go build -o argus-node-linux-%s ./cmd/argus-node",
+			remoteArch, goArchOf(remoteArch), goArchOf(remoteArch)))
 	}
-	step("二进制就绪")
+	cfg.BinaryPath = binaryPath
+	step("二进制: " + filepath.Base(binaryPath))
 
 	// 4. 上传二进制（通过 SSH cat 写入）
 	if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
@@ -218,4 +230,55 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+
+// pickBinary 按远端架构找本机对应的 argus-node 二进制。
+// 优先精确匹配 argus-node-linux-{arch}，回退同目录通用名（仅同架构时）。
+func pickBinary(remoteArch string) string {
+	goArch := goArchOf(remoteArch)
+	if goArch == "" {
+		return ""
+	}
+	candidates := []string{
+		fmt.Sprintf("argus-node-linux-%s", goArch),              // 交叉编译产物（优先）
+		fmt.Sprintf("argus-server-linux-%s", goArch),              // 兼容（极端情况）
+	}
+	// 仅当 server 本身就是 Linux + 同架构时，通用名也可用
+	if runtime.GOOS == "linux" && runtime.GOARCH == goArch {
+		candidates = append(candidates, "argus-node", "/usr/local/bin/argus-node")
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			abs, _ := filepath.Abs(c)
+			return abs
+		}
+	}
+	return ""
+}
+
+// goArchOf 将 uname -m 输出映射为 Go GOARCH。
+func goArchOf(unameArch string) string {
+	switch strings.TrimSpace(unameArch) {
+	case "x86_64", "amd64":
+		return "amd64"
+	case "aarch64", "arm64":
+		return "arm64"
+	case "armv7l", "armv6l", "arm":
+		return "arm"
+	case "i386", "i686":
+		return "386"
+	case "mips":
+		return "mips"
+	case "mips64", "mips64el":
+		return "mips64"
+	case "ppc64", "ppc64le":
+		return "ppc64"
+	case "s390x":
+		return "s390x"
+	case "riscv64":
+		return "riscv64"
+	default:
+		return ""
+	}
 }

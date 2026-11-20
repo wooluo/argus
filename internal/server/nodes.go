@@ -8,7 +8,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"runtime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -463,8 +462,7 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 			req.NodeToken = "argus-node-auto"
 		}
 	}
-	// 二进制路径：server 自身的 arch 对应编译产物
-	req.BinaryPath = binaryForRequest()
+	// BinaryPath 留空——Deploy 内部会检测远端架构自动选择
 
 	// 异步部署（SSH 可能 10-30 秒）
 	go func() {
@@ -489,19 +487,3 @@ func localIP() string {
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
-// binaryForRequest 根据 server 运行平台找 argus-node 二进制。
-func binaryForRequest() string {
-	// 同目录 / 同 arch 优先
-	candidates := []string{
-		"argus-node",                                // 同目录
-		"/usr/local/bin/argus-node",                 // 已安装
-		"argus-node-" + runtime.GOOS + "-" + runtime.GOARCH, // 交叉编译产物
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			abs, _ := filepath.Abs(c)
-			return abs
-		}
-	}
-	return ""
-}
