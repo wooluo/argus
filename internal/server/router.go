@@ -67,6 +67,13 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/reports", a.ListReports)
 		apig.Patch("/api/findings/{id}", a.UpdateFindingStatus)
 		apig.Post("/api/findings/{id}/retest", a.RetestFinding)
+		apig.Get("/api/knowledge", a.ListKnowledge)
+		apig.Post("/api/knowledge", a.CreateKnowledge)
+		apig.Get("/api/knowledge/github-config", a.GetGithubConfig)
+		apig.Put("/api/knowledge/github-config", a.PutGithubConfig)
+		apig.Get("/api/knowledge/{kid}/content", a.KnowledgeContent)
+		apig.Put("/api/knowledge/{kid}", a.UpdateKnowledge)
+		apig.Delete("/api/knowledge/{kid}", a.DeleteKnowledge)
 		apig.Get("/api/agent-logs", a.ListAgentLogs)
 
 		// Settings（设置页；auth 写后热更新）
