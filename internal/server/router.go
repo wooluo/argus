@@ -58,6 +58,8 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			tr.Route("/{id}", func(trr chi.Router) {
 				trr.Get("/", a.GetTask)
 				trr.Post("/stop", a.StopTask)
+				trr.Get("/tree", a.DecisionTree)
+				trr.Get("/exploration", a.ExplorationGraph)
 			})
 		})
 
