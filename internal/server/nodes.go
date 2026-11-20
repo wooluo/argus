@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
+	"runtime"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/wooluo/argus/internal/config"
+	"github.com/wooluo/argus/internal/deploy"
 	"github.com/wooluo/argus/internal/auth"
 	"github.com/wooluo/argus/internal/store"
 )
@@ -430,4 +433,75 @@ func (n *NodeAPI) pushNotify(taskID int64, status, message string) {
 			_ = resp.Body.Close()
 		}
 	}()
+}
+
+// DeployNode: POST /api/nodes/deploy — SSH 引导式节点部署。
+// UI 填 VPS 连接信息 → server SSH 上去装 argus-node → 节点自行回连注册。
+func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
+	var req deploy.SSHConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jerr(w, 422, "参数解析失败: "+err.Error())
+		return
+	}
+	if req.Host == "" || req.Username == "" || req.NodeName == "" {
+		jerr(w, 422, "host/username/node_name 必填")
+		return
+	}
+	// 默认值
+	if req.Port == 0 {
+		req.Port = 22
+	}
+	if req.AuthType == "" {
+		req.AuthType = "password"
+	}
+	if req.ServerURL == "" {
+		req.ServerURL = "http://" + localIP() + ":7887"
+	}
+	if req.NodeToken == "" {
+		req.NodeToken = store.GetSetting(n.DB, "node_deploy_token")
+		if req.NodeToken == "" {
+			req.NodeToken = "argus-node-auto"
+		}
+	}
+	// 二进制路径：server 自身的 arch 对应编译产物
+	req.BinaryPath = binaryForRequest()
+
+	// 异步部署（SSH 可能 10-30 秒）
+	go func() {
+		result := deploy.Deploy(req)
+		n.Bus.Publish("node_deploy", map[string]any{
+			"node_name": req.NodeName, "host": req.Host, "result": result,
+		})
+	}()
+	jout(w, 200, map[string]any{
+		"ok": true, "message": "部署已启动（异步），结果将实时推送到节点列表",
+		"node_name": req.NodeName,
+	})
+}
+
+// localIP 获取本机非回环 IP（节点回连地址用）。
+func localIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
+// binaryForRequest 根据 server 运行平台找 argus-node 二进制。
+func binaryForRequest() string {
+	// 同目录 / 同 arch 优先
+	candidates := []string{
+		"argus-node",                                // 同目录
+		"/usr/local/bin/argus-node",                 // 已安装
+		"argus-node-" + runtime.GOOS + "-" + runtime.GOARCH, // 交叉编译产物
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			abs, _ := filepath.Abs(c)
+			return abs
+		}
+	}
+	return ""
 }
