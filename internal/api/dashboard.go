@@ -366,10 +366,15 @@ func (a *API) DecideApproval(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Approve bool   `json:"approve"`
 		Reason  string `json:"reason"`
+		By      string `json:"by"` // 决策人（缺省 operator；蓝本截断 32）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondErr(w, 422, err.Error())
 		return
+	}
+	by := orDefault(req.By, "operator")
+	if len(by) > 32 {
+		by = by[:32]
 	}
 	status := "denied"
 	if req.Approve {
@@ -377,7 +382,7 @@ func (a *API) DecideApproval(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := a.DB.Exec(
 		`UPDATE approvals SET status=?, decided_by=?, reason=? WHERE id=? AND status='pending'`,
-		status, "operator", req.Reason, id)
+		status, by, req.Reason, id)
 	if err != nil {
 		respondErr(w, 500, err.Error())
 		return
@@ -386,6 +391,8 @@ func (a *API) DecideApproval(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, 404, "approval not found or already decided")
 		return
 	}
+	// 决策即时通知（节点轮询最迟 3s 后解锁；前端审批页可订阅刷新）
+	a.Bus.Publish("approval_done", map[string]any{"id": id, "status": status, "by": by})
 	respondJSON(w, 200, map[string]any{"ok": true, "status": status})
 }
 

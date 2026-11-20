@@ -170,6 +170,15 @@ func (a *API) StopTask(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, 500, err.Error())
 		return
 	}
+	// 停止即拒绝该任务全部待审批项（蓝本 deny_pending：节点侧轮询随即解锁）
+	if res, err := a.DB.Exec(
+		`UPDATE approvals SET status='denied',decided_by='task-stop',decided_at=?
+		 WHERE task_id=? AND status='pending'`, store.Now(), id); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			a.Bus.Publish("approval_done", map[string]any{
+				"task_id": id, "status": "denied(task-stop)", "count": n})
+		}
+	}
 	a.Bus.Publish("task_stopped", map[string]any{"id": id})
 	respondJSON(w, 200, map[string]bool{"ok": true})
 }

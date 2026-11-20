@@ -174,6 +174,9 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			ng.Get("/poll", nodeAPI.Poll)
 			ng.Post("/result", nodeAPI.ReportResult)
 			ng.Post("/progress", nodeAPI.Progress)
+			// HITL 审批门：节点写 pending + 轮询决定（管理面 /api/approvals 决策）
+			ng.Post("/approvals", nodeAPI.CreateApproval)
+			ng.Get("/approvals/{id}", nodeAPI.GetApproval)
 		})
 	})
 

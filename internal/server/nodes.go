@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/wooluo/argus/internal/config"
 	"github.com/wooluo/argus/internal/deploy"
 	"github.com/wooluo/argus/internal/auth"
@@ -177,8 +179,15 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 	// 知识注入：项目已有知识库条目随任务下发（node 侧拼入任务书，跨任务经验复用）
 	knowledgeBlock := n.buildKnowledgeBlock()
 
+	// HITL 审批名单下发（节点 agent 执行前拦截；空数组=无审批）
+	var approvalsRequire []string
+	_ = json.Unmarshal([]byte(store.GetSetting(n.DB, "approvals_require")), &approvalsRequire)
+	if approvalsRequire == nil {
+		approvalsRequire = []string{}
+	}
+
 	jout(w, 200, map[string]any{"task": t, "project": p, "llm": json.RawMessage(llmCfg),
-		"knowledge": knowledgeBlock})
+		"knowledge": knowledgeBlock, "approvals_require": approvalsRequire})
 }
 
 // buildKnowledgeBlock 启用状态的知识条目（≤5 条 × 截断），注入任务书（蓝本 _knowledge_block）。
@@ -231,6 +240,70 @@ func (n *NodeAPI) buildKnowledgeBlock() string {
 		return ""
 	}
 	return "## 知识库（历史任务沉淀，按需应用）\n\n" + strings.Join(parts, "\n\n") + "\n"
+}
+
+// approvalWait 审批等待上限；超过即自动拒绝（与节点端 cmd/argus-node/approval.go 一致）。
+const approvalWait = 600 * time.Second
+
+// CreateApproval: POST /api/nodes/approvals — 节点侧 HITL 审批请求
+// （写 pending + SSE 通知操作员；管理面 /api/approvals 列表可见、可决策）。
+func (n *NodeAPI) CreateApproval(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID    int64          `json:"task_id"`
+		ProjectID int64          `json:"project_id"`
+		Tool      string         `json:"tool"`
+		Args      map[string]any `json:"args"`
+		Reason    string         `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Tool == "" || req.TaskID == 0 {
+		jerr(w, 422, "task_id/tool 必填")
+		return
+	}
+	argsJSON, _ := json.Marshal(req.Args)
+	if req.Args == nil {
+		argsJSON = []byte("{}")
+	}
+	if len(req.Reason) > 2000 {
+		req.Reason = req.Reason[:2000]
+	}
+	res, err := n.DB.Exec(`INSERT INTO approvals(task_id,project_id,tool,args,reason,status,created_at)
+		VALUES(?,?,?,?,?,'pending',?)`,
+		req.TaskID, req.ProjectID, req.Tool, string(argsJSON), req.Reason, store.Now())
+	if err != nil {
+		jerr(w, 500, err.Error())
+		return
+	}
+	id, _ := res.LastInsertId()
+	n.Bus.Publish("approval_pending", map[string]any{
+		"id": id, "task_id": req.TaskID, "tool": req.Tool,
+		"content": fmt.Sprintf("⛔ 调用 %s 需人工审批（等待中，%.0fs 超时自动拒绝）",
+			req.Tool, approvalWait.Seconds()),
+	})
+	jout(w, 200, map[string]any{"id": id})
+}
+
+// GetApproval: GET /api/nodes/approvals/{id} — 节点轮询决定；
+// 超时未决的自动落库为 denied(timeout)（兜底：节点侧有自己的超时）。
+func (n *NodeAPI) GetApproval(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var status, createdAt string
+	if err := n.DB.QueryRow(`SELECT status,created_at FROM approvals WHERE id=?`, id).
+		Scan(&status, &createdAt); err != nil {
+		jerr(w, 404, "approval not found")
+		return
+	}
+	if status == "pending" {
+		if t, err := time.Parse("2006-01-02T15:04:05.000Z", createdAt); err == nil &&
+			time.Since(t) > approvalWait {
+			if res, err := n.DB.Exec(
+				`UPDATE approvals SET status='denied',decided_by='timeout',decided_at=?
+				 WHERE id=? AND status='pending'`, store.Now(), id); err == nil && rowsAffected(res) > 0 {
+				status = "denied"
+				n.Bus.Publish("approval_done", map[string]any{"id": id, "status": "denied(timeout)"})
+			}
+		}
+	}
+	jout(w, 200, map[string]any{"status": status})
 }
 
 // ReportResult: POST /api/nodes/result — 节点执行完毕回传 findings/assets/logs。

@@ -42,9 +42,9 @@ type Agent struct {
 	// recentCalls 近 16 次工具调用签名（同参重复直接拦截）
 	recentCalls map[string]string // 签名 → 上次结果摘要
 	callOrder   []string          // 签名时效（LRU 裁剪）
-	digest     []string // 工作纪要（上下文压缩后的攻击链记忆）
-	nudges     int      // 过早收工纠正次数（上限 3）
-	failStreak int      // 连续工具失败计数（≥2 次注入换思路提示）
+	digest     []string           // 工作纪要（上下文压缩后的攻击链记忆）
+	nudges     int                // 过早收工纠正次数（上限 3）
+	failStreak map[string]int     // 同签名（工具+参数）连续失败计数（蓝本 _track_failure）
 	tokPrompt    int64  // LLM token 累计（prompt）
 	tokCompletion int64 // LLM token 累计（completion）
 	tokCalls     int64  // LLM 调用次数
@@ -63,7 +63,7 @@ func New(client *llm.Client, opts Options, toolSet []tools.Tool, tc *tools.Conte
 		opts.MaxSteps = 120
 	}
 	return &Agent{opts: opts, client: client, tools: toolSet, ctx: tc,
-		recentCalls: map[string]string{}}
+		recentCalls: map[string]string{}, failStreak: map[string]int{}}
 }
 
 // Steps 实际执行步数。
@@ -199,6 +199,12 @@ func (a *Agent) executeOne(ctx context.Context, call llm.ToolCall, byName map[st
 		return llm.Message{Role: "tool", ToolCallID: call.ID,
 			Name: call.Function.Name, Content: tip}, ""
 	}
+	// ── HITL 审批门：approvals.require 名单内工具执行前需人工批准（蓝本 _exec_tool）──
+	if msg, blocked := a.checkApproval(ctx, call, args); blocked {
+		a.noteDigest(call.Function.Name, args, false, msg)
+		return llm.Message{Role: "tool", ToolCallID: call.ID,
+			Name: call.Function.Name, Content: msg}, ""
+	}
 	started := time.Now()
 	out, err := tool.Execute(ctx, args, a.ctx)
 	dur := time.Since(started)
@@ -218,20 +224,20 @@ func (a *Agent) executeOne(ctx context.Context, call llm.ToolCall, byName map[st
 			step, call.Function.Name, compactArgs(args), resultSummary(out, err), dur.Seconds()))
 	}
 	if err != nil {
-		// 失败连击：同工具连续失败 ≥2 次时注入换思路提示（蓝本 _track_failure）
-		a.failStreak++
+		// 失败连击：同签名（工具+参数）连续失败 ≥2 次注入纠正提示（蓝本 _track_failure）
+		a.failStreak[sig]++
 		content := "错误: " + err.Error()
-		if a.failStreak >= 2 {
-			content += "\n\n⚠ 该工具已连续失败 " + fmt.Sprint(a.failStreak) +
-				" 次。根据工作纪律第 3 条：同一调用失败 2 次后必须换思路，不要原样重试。" +
-				"请更换参数、换一个工具，或跳过此路径。"
+		if n := a.failStreak[sig]; n >= 2 {
+			content += "\n\n⚠ 注意：该调用已原样重复失败 " + fmt.Sprint(n) +
+				" 次。禁止再次原样重试！请仔细阅读上面的错误说明，" +
+				"按其建议更换工具或修正参数；若确无可用手段，直接输出阶段总结结束本阶段。"
 		}
 		return llm.Message{
 			Role: "tool", ToolCallID: call.ID, Name: call.Function.Name,
 			Content: content,
 		}, ""
 	}
-	a.failStreak = 0 // 成功即重置
+	delete(a.failStreak, sig) // 成功即重置该签名的计数
 	content := tools.Truncate(out, 6000)
 	// ── 响应收敛检测：归一化（数字→N）指纹，滑窗 3 次全同提示换思路 ──
 	if conv := a.noteConverge(out); conv != "" {

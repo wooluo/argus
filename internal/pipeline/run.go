@@ -41,6 +41,16 @@ func Run(ctx context.Context, b Brief, onFlush func(Result)) *Result {
 	}
 	// scope 护栏
 	tc.Scope = scope.New(b.ProjectID, b.Scope, b.AllowHosts)
+	// HITL 审批门：名单 + 门实现注入 Extra（agent executeOne 执行前检查）
+	if len(b.ApprovalsRequire) > 0 || b.ApprovalGate != nil {
+		if tc.Extra == nil {
+			tc.Extra = map[string]any{}
+		}
+		tc.Extra["approvals_require"] = b.ApprovalsRequire
+		if b.ApprovalGate != nil {
+			tc.Extra["approval_gate"] = b.ApprovalGate
+		}
+	}
 
 	client := llm.NewClient(llm.DefaultProvider(b.LLM))
 

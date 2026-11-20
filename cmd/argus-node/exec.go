@@ -32,6 +32,7 @@ type pollTask struct {
 		Proxy   string `json:"proxy"`
 	} `json:"llm"`
 	Knowledge string `json:"knowledge"` // server 注入的知识库块
+	ApprovalsRequire []string `json:"approvals_require"` // HITL 审批名单（空=无审批）
 }
 
 // buildBrief 从 Poll 响应组装 pipeline.Brief。
@@ -59,6 +60,7 @@ func (p *pollTask) buildBrief() pipeline.Brief {
 	b.LLM.Model = p.LLM.Model
 	b.LLM.Proxy = p.LLM.Proxy
 	b.Knowledge = p.Knowledge
+	b.ApprovalsRequire = p.ApprovalsRequire
 	return b
 }
 
@@ -66,6 +68,8 @@ func (p *pollTask) buildBrief() pipeline.Brief {
 // 增量上报走 onFlush（≥5s 节流；失败不致命，最终 result 兜底）。
 func execTask(p *pollTask) *pipeline.Result {
 	brief := p.buildBrief()
+	// HITL 审批门：经 server HTTP 回连（名单命中时写 pending + 轮询人工决定）
+	brief.ApprovalGate = approvalGate{taskID: brief.TaskID, projectID: brief.ProjectID}
 	var lastFlush time.Time
 	onFlush := func(inc pipeline.Result) {
 		if time.Since(lastFlush) < 5*time.Second {

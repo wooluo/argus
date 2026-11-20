@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/wooluo/argus/internal/agent"
 	"github.com/wooluo/argus/internal/llm"
 	"github.com/wooluo/argus/internal/scope"
 	"github.com/wooluo/argus/internal/tools"
@@ -27,6 +28,9 @@ type Brief struct {
 	Scope       []scope.Rule `json:"scope"`
 	AllowHosts  []string     `json:"allow_hosts"`
 	LLM         llm.Config   `json:"llm"`
+	// HITL 审批门：名单由 server Poll 下发，门实现由节点注入（HTTP 回连）。
+	ApprovalsRequire []string           `json:"approvals_require"`
+	ApprovalGate     agent.ApprovalGate `json:"-"`
 }
 
 // Finding / Asset / LogItem 与 server ReportResult 请求体字段一一对应。
