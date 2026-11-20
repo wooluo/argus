@@ -19,11 +19,11 @@ import (
 // argus 节点体系：本机即 Kali 执行环境（原版 SSH 远端 → 本地 exec 直通）。
 
 // cmdBlacklist 命令黑名单（对应 kali_exec._BLACKLIST / run_script._CODE_BLACKLIST）。
+// rm 系不在此表：RE2 无负向前瞻，rm -rf 的放行/拦截由 rmrfBlocked 单独处理。
 var cmdBlacklist = []struct {
 	pat *regexp.Regexp
 	why string
 }{
-	{regexp.MustCompile(`(?i)rm\s+(-[a-z]+\s+)*-[a-z]*r[a-z]*f[a-z]*\s+/(?!tmp|home/|var/tmp)`), "rm -rf 根路径"},
 	{regexp.MustCompile(`(?i)\bmkfs(\.\w+)?\b`), "格式化磁盘"},
 	{regexp.MustCompile(`(?i)\b(shutdown|reboot|halt|poweroff)\b`), "关机/重启"},
 	{regexp.MustCompile(`(?i)\binit\s+[06]\b`), "切换运行级"},
@@ -40,7 +40,25 @@ var cmdBlacklist = []struct {
 }
 
 // checkBlacklist 命中黑名单返回原因。
+var rmrfRe = regexp.MustCompile(`(?i)rm\s+(?:-[a-z]+\s+)*-[a-z]*r[a-z]*f[a-z]*\s+(/\S*)`)
+
+// rmrfBlocked 逐个 rm -rf 检查目标：/tmp /home/ /var/tmp 放行，其余绝对路径拦截。
+// shortcut: 前缀匹配，/tmpx 也会放行（与蓝本 (?!tmp) 行为一致）
+func rmrfBlocked(s string) bool {
+	for _, m := range rmrfRe.FindAllStringSubmatch(s, -1) {
+		t := strings.ToLower(m[1])
+		if strings.HasPrefix(t, "/tmp") || strings.HasPrefix(t, "/home/") || strings.HasPrefix(t, "/var/tmp") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func checkBlacklist(s string) string {
+	if rmrfBlocked(s) {
+		return "rm -rf 根路径"
+	}
 	for _, b := range cmdBlacklist {
 		if b.pat.MatchString(s) {
 			return b.why
