@@ -44,6 +44,11 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 				prr.Delete("/", a.DeleteProject)
 				prr.Post("/tasks", a.StartTask)
 				prr.Post("/findings", a.CreateFinding)
+				// Reports（报告域）
+				prr.Get("/report", a.GetProjectReport)
+				prr.Get("/report/export", a.ExportReport)
+				prr.Get("/report/preview", a.PreviewReport)
+				prr.Post("/report/generate", a.GenerateReport)
 			})
 		})
 
@@ -59,6 +64,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		// Assets / Findings / Logs
 		apig.Get("/api/assets", a.ListAssets)
 		apig.Get("/api/findings", a.ListFindings)
+		apig.Get("/api/reports", a.ListReports)
 		apig.Patch("/api/findings/{id}", a.UpdateFindingStatus)
 		apig.Get("/api/agent-logs", a.ListAgentLogs)
 
