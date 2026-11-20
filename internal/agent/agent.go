@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"fmt"
 	"sync"
 	"time"
@@ -34,6 +35,15 @@ type Agent struct {
 	step      int
 	toolCalls int
 	started   time.Time
+
+	// 推理防空转（移植自 AutoPentest agent.py）：
+	// recentCalls 近 16 次工具调用签名（同参重复直接拦截）
+	recentCalls map[string]string // 签名 → 上次结果摘要
+	callOrder   []string          // 签名时效（LRU 裁剪）
+	// resHist 响应收敛检测：归一化指纹滑窗 3 次，全同即注入换思路提示
+	resHist  [3]string
+	resHistN int
+	convNoted string // 本轮收敛指纹（同轮只提示一次）
 }
 
 // New 构造 Agent。
@@ -44,7 +54,8 @@ func New(client *llm.Client, opts Options, toolSet []tools.Tool, tc *tools.Conte
 	if opts.MaxSteps <= 0 {
 		opts.MaxSteps = 120
 	}
-	return &Agent{opts: opts, client: client, tools: toolSet, ctx: tc}
+	return &Agent{opts: opts, client: client, tools: toolSet, ctx: tc,
+		recentCalls: map[string]string{}}
 }
 
 // Steps 实际执行步数。
@@ -132,9 +143,30 @@ func (a *Agent) executeOne(ctx context.Context, call llm.ToolCall, byName map[st
 			Content: "错误: 未知工具 " + call.Function.Name,
 		}, ""
 	}
+	// ── 重复调用闸门（近 16 次内同签名直接拦截，回上次结果摘要）──
+	sig := call.Function.Name + "|" + call.Function.Arguments
+	if prev, dup := a.recentCalls[sig]; dup {
+		if a.ctx != nil && a.ctx.Reporter != nil {
+			a.ctx.Reporter.Log(ctx, "agent", a.opts.Stage,
+				"⛔ 重复调用拦截: "+call.Function.Name+"（同参数已执行过）")
+		}
+		tip := "⛔ 重复调用已拦截：你刚才已用完全相同的参数调用过 " + call.Function.Name +
+			"，结果不会改变。上次结果摘要：" + tools.Truncate(prev, 250) +
+			"。请更换参数、换一个工具，或换一条测试思路。"
+		return llm.Message{Role: "tool", ToolCallID: call.ID,
+			Name: call.Function.Name, Content: tip}, ""
+	}
 	started := time.Now()
 	out, err := tool.Execute(ctx, args, a.ctx)
 	dur := time.Since(started)
+	if err == nil {
+		a.recentCalls[sig] = out
+		a.callOrder = append(a.callOrder, sig)
+		if len(a.callOrder) > 16 {
+			delete(a.recentCalls, a.callOrder[0])
+			a.callOrder = a.callOrder[1:]
+		}
+	}
 	if a.ctx != nil && a.ctx.Reporter != nil {
 		a.ctx.Reporter.Log(ctx, "agent", a.opts.Stage, fmt.Sprintf(
 			"[%d] %s(%s) → %s (%.1fs)",
@@ -147,11 +179,37 @@ func (a *Agent) executeOne(ctx context.Context, call llm.ToolCall, byName map[st
 			Content: "错误: " + err.Error(),
 		}, ""
 	}
+	content := tools.Truncate(out, 6000)
+	// ── 响应收敛检测：归一化（数字→N）指纹，滑窗 3 次全同提示换思路 ──
+	if conv := a.noteConverge(out); conv != "" {
+		content += "\n\n" + conv
+	}
 	return llm.Message{
 		Role: "tool", ToolCallID: call.ID, Name: call.Function.Name,
-		Content: tools.Truncate(out, 6000),
+		Content: content,
 	}, ""
 }
+
+// noteConverge 归一化指纹滑窗检测；返回提示文本（空=不提示）。
+func (a *Agent) noteConverge(out string) string {
+	norm := digitsToN(tools.Truncate(out, 600))
+	a.resHist[a.resHistN%3] = norm
+	a.resHistN++
+	if a.resHistN < 3 || a.convNoted == norm {
+		return ""
+	}
+	if a.resHist[0] != a.resHist[1] || a.resHist[1] != a.resHist[2] {
+		return ""
+	}
+	a.convNoted = norm
+	a.resHistN = 0
+	return "⚠ 响应收敛检测：最近 3 次工具调用返回完全相同的响应模式（仅数字不同）。" +
+		"该参数空间已无新信息，禁止继续同类尝试——请立即更换目标、参数类型、工具，或转入其他攻击面。"
+}
+
+var digitRe = regexp.MustCompile(`\d+`)
+
+func digitsToN(s string) string { return digitRe.ReplaceAllString(s, "N") }
 
 func trimMessages(messages []llm.Message, limit int) []llm.Message {
 	if len(messages) <= limit+1 {

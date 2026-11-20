@@ -22,7 +22,7 @@ func TestCheckBlacklist(t *testing.T) {
 
 // TestRegistryCount 全部工具注册成功（init panic / 漏注册都会在此暴露）。
 func TestRegistryCount(t *testing.T) {
-	if n := len(Names()); n != 30 {
-		t.Fatalf("registered %d tools, want 30: %v", n, Names())
+	if n := len(Names()); n != 31 {
+		t.Fatalf("registered %d tools, want 31: %v", n, Names())
 	}
 }

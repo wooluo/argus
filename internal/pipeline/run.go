@@ -50,9 +50,11 @@ func Run(ctx context.Context, b Brief, onFlush func(Result)) *Result {
 
 	if b.Mode == "autonomous" {
 		runAutonomous(ctx, b, tc, rep, res, client)
-		return res
+	} else {
+		runStaged(ctx, b, tc, rep, res, client)
 	}
-	runStaged(ctx, b, tc, rep, res, client)
+	// 自我迭代：任务完成后自动复盘（尽力而为，失败不影响结果）
+	reflectAfterRun(ctx, b, res, rep, client)
 	return res
 }
 
