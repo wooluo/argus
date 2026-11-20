@@ -90,43 +90,34 @@ func pollAndRun() bool {
 	if err != nil || code != 200 {
 		return false
 	}
-	var t struct {
-		Task struct {
-			TaskID    int    `json:"id"`
-			Name      string `json:"name"`
-			Mode      string `json:"mode"`
-			ProjectID int    `json:"project_id"`
-		} `json:"task"`
-	}
-	if json.Unmarshal(body, &t) != nil || t.Task.TaskID == 0 {
+	var p pollTask
+	if json.Unmarshal(body, &p) != nil || p.Task.TaskID == 0 {
 		return false
 	}
-	log.Printf("task %d picked: %s (mode=%s)", t.Task.TaskID, t.Task.Name, t.Task.Mode)
+	log.Printf("task %d picked: %s (mode=%s)", p.Task.TaskID, p.Task.Name, p.Task.Mode)
 
 	start := time.Now()
-	execTask(t.Task.TaskID, t.Task.Name, t.Task.Mode, t.Task.ProjectID)
+	res := execTask(&p)
 	elapsed := time.Since(start).Seconds()
 
 	payload := map[string]any{
-		"task_id": t.Task.TaskID,
-		"status":  "done",
-		"message": fmt.Sprintf("node %s executed task %d in %.1fs",
-			nodeName, t.Task.TaskID, elapsed),
+		"task_id":  p.Task.TaskID,
+		"status":   res.Status,
+		"message":  fmt.Sprintf("%s（node %s, %.1fs）", res.Message, nodeName, elapsed),
+		"findings": res.Findings,
+		"assets":   res.Assets,
+		"logs":     res.Logs,
+	}
+	if res.Report != "" {
+		payload["report"] = res.Report
 	}
 	c, _, err := call("POST", "/api/nodes/result", payload)
 	if err != nil || c != 200 {
 		log.Printf("report result failed: %v (code=%d)", err, c)
 	} else {
-		log.Printf("task %d done in %.1fs", t.Task.TaskID, elapsed)
+		log.Printf("task %d %s in %.1fs", p.Task.TaskID, res.Status, elapsed)
 	}
 	return true
-}
-
-// execTask: v0 占位执行器 — 扫描工具集成留待后续版本。
-func execTask(taskID int, name, mode string, projectID int) {
-	log.Printf("[exec] task=%d name=%s mode=%s project=%d (v0 placeholder)",
-		taskID, name, mode, projectID)
-	time.Sleep(2 * time.Second)
 }
 
 // registerAndSave: 注册并把节点 token 落盘。

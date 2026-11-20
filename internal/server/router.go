@@ -75,6 +75,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			ng.Post("/heartbeat", nodeAPI.Heartbeat)
 			ng.Get("/poll", nodeAPI.Poll)
 			ng.Post("/result", nodeAPI.ReportResult)
+			ng.Post("/progress", nodeAPI.Progress)
 		})
 	})
 

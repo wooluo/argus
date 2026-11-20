@@ -158,7 +158,15 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 	}
 	t.FinishedAt = nilOrString(finishedAt)
 	t.AssignedAt = nilOrString(assignedAt)
-	jout(w, 200, map[string]any{"task": t})
+
+	// 附带项目概要与 LLM 配置：节点构建任务书必需（scope/description/llm key）。
+	var p store.Project
+	var llmCfg store.RawJSON
+	_ = n.DB.QueryRow(`SELECT id,name,description,scope,authorized,allow_hosts,created_at FROM projects WHERE id=?`, t.ProjectID).
+		Scan(&p.ID, &p.Name, &p.Description, &p.Scope, &p.Authorized, &p.AllowHosts, &p.CreatedAt)
+	_ = n.DB.QueryRow(`SELECT value FROM settings WHERE key='llm'`).Scan(&llmCfg)
+
+	jout(w, 200, map[string]any{"task": t, "project": p, "llm": json.RawMessage(llmCfg)})
 }
 
 // ReportResult: POST /api/nodes/result — 节点执行完毕回传 findings/assets/logs。
@@ -185,6 +193,7 @@ func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 			Tool    string `json:"tool"`
 			Content string `json:"content"`
 		} `json:"logs"`
+		Report string `json:"report"` // 任务最终 Markdown 报告（落 reports 表）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == 0 {
 		jerr(w, 422, "task_id required")
@@ -211,12 +220,19 @@ func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, l := range req.Logs {
-		_, _ = n.DB.Exec(`INSERT INTO agent_logs(task_id,stage,tool,content) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM tasks WHERE id=?)`,
-			req.TaskID, l.Stage, l.Tool, l.Content, req.TaskID)
+		_, _ = n.DB.Exec(`INSERT INTO agent_logs(task_id,stage,type,tool,content) SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM tasks WHERE id=?)`,
+			req.TaskID, l.Stage, l.Tool, l.Tool, l.Content, req.TaskID)
 	}
 	status := req.Status
 	if status == "" {
 		status = "done"
+	}
+	if req.Report != "" {
+		if _, err := n.DB.Exec(`INSERT INTO reports(project_id,task_id,markdown)
+			SELECT project_id,?,? FROM tasks WHERE id=?`, req.TaskID, req.Report, req.TaskID); err != nil {
+			jerr(w, 500, err.Error())
+			return
+		}
 	}
 	if _, err := n.DB.Exec(`UPDATE tasks SET status=?,finished_at=?,message=? WHERE id=?`,
 		status, store.Now(), req.Message, req.TaskID); err != nil {
@@ -225,6 +241,91 @@ func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 	}
 	n.Bus.Publish("task_done", map[string]any{"task_id": req.TaskID, "status": status})
 	jout(w, 200, map[string]any{"ok": true})
+}
+
+// NodeBatch: Progress / ReportResult 共用的批量落库。
+func (n *NodeAPI) storeNodeBatch(w http.ResponseWriter, taskID int64,
+	findings, assets, logs any) {
+	// findings / assets / logs 为匿名结构切片，走 JSON 重编码最省事
+	buf, _ := json.Marshal(map[string]any{
+		"findings": findings, "assets": assets, "logs": logs,
+	})
+	var req struct {
+		Findings []struct {
+			Name     string `json:"name"`
+			Severity string `json:"severity"`
+			Target   string `json:"target"`
+			Detail   string `json:"detail"`
+			Evidence string `json:"evidence"`
+			PoC      string `json:"poc"`
+		} `json:"findings"`
+		Assets []struct {
+			Type   string `json:"type"`
+			Value  string `json:"value"`
+			Detail string `json:"detail"`
+		} `json:"assets"`
+		Logs []struct {
+			Stage   string `json:"stage"`
+			Tool    string `json:"tool"`
+			Content string `json:"content"`
+		} `json:"logs"`
+	}
+	_ = json.Unmarshal(buf, &req)
+	for _, f := range req.Findings {
+		sev := f.Severity
+		if sev == "" {
+			sev = "info"
+		}
+		if _, err := n.DB.Exec(`INSERT INTO findings(project_id,name,severity,target,detail,evidence,poc,source)
+			SELECT project_id,?,?,?,?,?,?,'node' FROM tasks WHERE id=?`,
+			f.Name, sev, f.Target, f.Detail, f.Evidence, f.PoC, taskID); err != nil {
+			jerr(w, 500, err.Error())
+			return
+		}
+	}
+	for _, s := range req.Assets {
+		if _, err := n.DB.Exec(`INSERT INTO assets(project_id,type,value,detail,source)
+			SELECT project_id,?,?,?,?,'node' FROM tasks WHERE id=?`,
+			s.Type, s.Value, s.Detail, taskID); err != nil {
+			jerr(w, 500, err.Error())
+			return
+		}
+	}
+	for _, l := range req.Logs {
+		_, _ = n.DB.Exec(`INSERT INTO agent_logs(task_id,stage,type,tool,content) SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM tasks WHERE id=?)`,
+			taskID, l.Stage, l.Tool, l.Tool, l.Content, taskID)
+	}
+	jout(w, 200, map[string]any{"ok": true})
+}
+
+// Progress: POST /api/nodes/progress — 节点执行中增量上报（长任务进度可见）。
+func (n *NodeAPI) Progress(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID   int64 `json:"task_id"`
+		Findings []struct {
+			Name     string `json:"name"`
+			Severity string `json:"severity"`
+			Target   string `json:"target"`
+			Detail   string `json:"detail"`
+			Evidence string `json:"evidence"`
+			PoC      string `json:"poc"`
+		} `json:"findings"`
+		Assets []struct {
+			Type   string `json:"type"`
+			Value  string `json:"value"`
+			Detail string `json:"detail"`
+		} `json:"assets"`
+		Logs []struct {
+			Stage   string `json:"stage"`
+			Tool    string `json:"tool"`
+			Content string `json:"content"`
+		} `json:"logs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == 0 {
+		jerr(w, 422, "task_id required")
+		return
+	}
+	n.storeNodeBatch(w, req.TaskID, req.Findings, req.Assets, req.Logs)
 }
 
 func rowsAffected(res sql.Result) int64 {
