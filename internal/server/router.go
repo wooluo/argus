@@ -61,6 +61,22 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/findings", a.ListFindings)
 		apig.Patch("/api/findings/{id}", a.UpdateFindingStatus)
 		apig.Get("/api/agent-logs", a.ListAgentLogs)
+
+		// Settings（设置页；auth 写后热更新）
+		apig.Get("/api/settings", a.GetSettings)
+		apig.Put("/api/settings/llm", a.PutLLM)
+		apig.Put("/api/settings/proxy", a.PutProxy)
+		apig.Put("/api/settings/target-proxy", a.PutTargetProxy)
+		apig.Put("/api/settings/tools", a.PutTools)
+		apig.Put("/api/settings/limits", a.PutLimits)
+		apig.Get("/api/settings/auth", a.GetAuth)
+		apig.Put("/api/settings/auth", a.PutAuth)
+		apig.Post("/api/settings/auth/generate", a.GenerateAuth)
+		apig.Post("/api/settings/llm/test", a.TestLLM)
+		apig.Get("/api/settings/llm/models", a.LLMModels)
+		apig.Get("/api/settings/llm/preset-keys", a.GetPresetKeys)
+		apig.Put("/api/settings/llm/preset-keys", a.PutPresetKey)
+		apig.Get("/api/tools", a.ToolsStatus)
 	})
 
 	// 节点面 API（独立鉴权域；注册需管理 token 防开放注册）

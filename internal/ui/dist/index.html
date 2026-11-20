@@ -1,122 +1,13 @@
-<!doctype html>
-<html lang="zh">
+<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Argus</title>
-<style>
-:root{--bg:#0b0e14;--fg:#d7dde8;--acc:#5ac8fa;--mut:#8b94a7}
-*{box-sizing:border-box}
-body{margin:0;font:14px/1.6 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;align-items:center;gap:10px;padding:14px 22px;border-bottom:1px solid #1c2230}
-header h1{font-size:17px;margin:0;letter-spacing:.5px}
-header .dot{width:8px;height:8px;border-radius:50%;background:#e5484d;transition:background .3s}
-header .dot.on{background:#46d68c}
-header .sub{color:var(--mut);font-size:12px}
-main{max-width:1080px;margin:0 auto;padding:22px}
-nav{display:flex;gap:4px;margin-bottom:18px;border-bottom:1px solid #1c2230}
-nav button{background:none;border:none;color:var(--mut);padding:8px 14px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent}
-nav button.act{color:var(--acc);border-bottom-color:var(--acc)}
-.card{background:#10141d;border:1px solid #1c2230;border-radius:10px;padding:16px 18px;margin-bottom:12px}
-.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.mut{color:var(--mut);font-size:12px}
-.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;border:1px solid #2a3346}
-.tag.critical{color:#ff6b6b;border-color:#ff6b6b}
-.tag.high{color:#ffa94d;border-color:#ffa94d}
-.tag.medium{color:#ffd43b;border-color:#ffd43b}
-.tag.low{color:#74c0fc;border-color:#74c0fc}
-.tag.info{color:#8b94a7;border-color:#8b94a7}
-button.pri{background:var(--acc);color:#04121c;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600}
-input,select,textarea{background:#0d1117;border:1px solid #2a3346;color:var(--fg);border-radius:7px;padding:7px 10px;font-size:13px}
-form label{display:block;margin:10px 0 4px;color:var(--mut);font-size:12px}
-.feed{max-height:300px;overflow:auto;font-size:12px;font-family:ui-monospace,monospace}
-.feed div{padding:3px 0;border-bottom:1px dashed #1c2230}
-.empty{text-align:center;color:var(--mut);padding:40px 0}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoPentest 自主渗透测试平台</title>
+  <script type="module" crossorigin src="/assets/index-kKv4EgBC.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-B2HDxQzX.css">
 </head>
 <body>
-<header>
-  <span class="dot" id="live"></span>
-  <h1>ARGUS</h1>
-  <span class="sub">自治渗透侦察平台 · Go</span>
-</header>
-<main>
-  <nav id="nav"></nav>
-  <div id="view"></div>
-</main>
-<script>
-const $=s=>document.querySelector(s);
-const state={tab:'projects',projects:[],tasks:[],findings:[],assets:[],logs:[]};
-
-async function api(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||r.status);return r.json()}
-
-const TABS=[['projects','项目'],['tasks','任务'],['findings','发现'],['assets','资产'],['logs','Agent日志'],['feed','实时流']];
-function renderNav(){
-  $('#nav').innerHTML=TABS.map(([k,l])=>`<button class="${state.tab===k?'act':''}" onclick="go('${k}')">${l}</button>`).join('');
-}
-function go(t){state.tab=t;renderNav();render()}
-
-function esc(s){return (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-
-function render(){
-  const v=$('#view');
-  if(state.tab==='feed'){v.innerHTML='<div class="card"><div class="feed" id="feed"></div></div>';return}
-  if(state.tab==='projects'){v.innerHTML=projectForm()+state.projects.map(p=>`
-    <div class="card"><div class="row"><b>${esc(p.name)}</b><span class="tag ${p.authorized?'info':'high'}">${p.authorized?'已授权':'未授权'}</span></div>
-    <div class="mut">${esc(p.description||'')}</div>
-    <div class="mut">scope: ${esc(p.scope)}</div>
-    <div class="row" style="margin-top:8px"><span class="mut">#${p.id} · ${esc(p.created_at)}</span>
-    <span><button class="pri" onclick="startTask(${p.id})" ${p.authorized?'':'disabled'}>启动任务</button>
-    <button class="pri" style="background:#e5484d" onclick="delProject(${p.id})">删除</button></span></div></div>`).join('');return}
-  if(state.tab==='tasks'){v.innerHTML=state.tasks.length?state.tasks.map(t=>`
-    <div class="card"><div class="row"><b>任务 #${t.id}</b><span class="tag ${t.status==='running'?'high':t.status==='done'?'low':'info'}">${esc(t.status)}</span></div>
-    <div class="mut">project #${t.project_id} · ${esc(t.mode)} · stage=${esc(t.current_stage||'-')} · tokens=${t.tokens}</div>
-    ${t.message?`<div class="mut">${esc(t.message)}</div>`:''}
-    <div class="row" style="margin-top:6px"><span class="mut">${esc(t.created_at)}</span>${t.status==='running'||t.status==='pending'?`<button class="pri" style="background:#e5484d" onclick="stopTask(${t.id})">停止</button>`:''}</div></div>`).join(''):'<div class="empty">暂无任务</div>';return}
-  if(state.tab==='findings'){v.innerHTML=state.findings.length?state.findings.map(f=>`
-    <div class="card"><div class="row"><b>${esc(f.name)}</b><span class="tag ${esc(f.severity)}">${esc(f.severity)}</span></div>
-    <div class="mut">target: ${esc(f.target)} · ${esc(f.status)}</div>
-    ${f.detail?`<div style="margin-top:6px">${esc(f.detail).slice(0,300)}</div>`:''}</div>`).join(''):'<div class="empty">暂无发现</div>';return}
-  if(state.tab==='assets'){v.innerHTML=state.assets.length?state.assets.map(s=>`
-    <div class="card"><div class="row"><b>${esc(s.value)}</b><span class="tag info">${esc(s.type)}</span></div>
-    <div class="mut">${esc(s.detail||'')} · source=${esc(s.source||'')}</div></div>`).join(''):'<div class="empty">暂无资产</div>';return}
-  if(state.tab==='logs'){v.innerHTML=state.logs.length?`<div class="card"><div class="feed">${state.logs.map(l=>`<div>[${esc(l.created_at)}] #${l.task_id} ${esc(l.stage||'')} <b>${esc(l.tool||l.type)}</b> ${esc((l.content||l.result_summary||'').slice(0,160))}</div>`).join('')}</div></div>`:'<div class="empty">暂无日志</div>';return}
-}
-
-function projectForm(){return `<div class="card"><form onsubmit="return createProject(event)">
-  <label>项目名</label><input id="p_name" required style="width:100%">
-  <label>描述</label><input id="p_desc" style="width:100%">
-  <label>scope（JSON 数组，如 ["1.2.3.4","example.com"]）</label><textarea id="p_scope" rows="2" style="width:100%">[]</textarea>
-  <label><input type="checkbox" id="p_auth" style="width:auto"> 已获书面授权</label>
-  <div style="margin-top:10px"><button class="pri" type="submit">创建项目</button></div></form></div>`}
-
-async function createProject(e){e.preventDefault();
-  try{await api('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('#p_name').value,description:$('#p_desc').value,scope:JSON.parse($('#p_scope').value||'[]'),authorized:$('#p_auth').checked})});await load()}catch(err){alert(err.message)}return false}
-async function delProject(id){if(!confirm('删除项目 '+id+'？'))return;await api('/api/projects/'+id,{method:'DELETE'});await load()}
-async function startTask(id){try{await api(`/api/projects/${id}/tasks`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"mode":"autonomous"}'});go('tasks');await load()}catch(err){alert(err.message)}}
-async function stopTask(id){await api(`/api/tasks/${id}/stop`,{method:'POST'});await load()}
-
-async function load(){
-  try{state.projects=await api('/api/projects')}catch(e){}
-  if(state.tab==='tasks'){try{state.tasks=await api('/api/tasks')}catch(e){}}
-  if(state.tab==='findings'){try{state.findings=await api('/api/findings')}catch(e){}}
-  if(state.tab==='assets'){try{state.assets=await api('/api/assets')}catch(e){}}
-  if(state.tab==='logs'){try{state.logs=await api('/api/agent-logs?limit=200')}catch(e){}}
-  render();
-}
-
-function connectSSE(){
-  const es=new EventSource('/api/stream');
-  es.onopen=()=>$('#live').classList.add('on');
-  es.onerror=()=>$('#live').classList.remove('on');
-  ['task_started','task_stopped','task_done','finding_created','project_created','project_deleted','node_heartbeat'].forEach(ev=>es.addEventListener(ev,e=>{
-    load();
-    const feed=$('#feed');
-    if(feed){const d=document.createElement('div');d.textContent=`[${new Date().toLocaleTimeString()}] ${ev} ${e.data}`;feed.prepend(d);if(feed.children.length>200)feed.lastChild.remove()}
-  }));
-}
-
-renderNav();render();load();setInterval(load,10000);connectSSE();
-</script>
+  <div id="app"></div>
 </body>
 </html>

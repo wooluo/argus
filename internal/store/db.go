@@ -202,3 +202,17 @@ var migrations = []string{
 	`INSERT OR IGNORE INTO settings(key, value) VALUES ('llm', '{}')`,
 	`INSERT OR IGNORE INTO settings(key, value) VALUES ('auth', '{}')`,
 }
+
+// GetSetting 读 settings 表；不存在返回空串。
+func GetSetting(db *sql.DB, key string) string {
+	var v string
+	_ = db.QueryRow(`SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	return v
+}
+
+// SetSetting 写 settings 表（UPSERT；对应原 settings.json 的键级保存）。
+func SetSetting(db *sql.DB, key, value string) error {
+	_, err := db.Exec(`INSERT INTO settings(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
