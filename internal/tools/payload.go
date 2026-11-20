@@ -39,7 +39,8 @@ var (
 	tbxErr  error
 )
 
-func toolbox() (*toolboxData, error) {
+// ToolboxData 返回内嵌工具箱数据（导出给 api 层复用）。
+func ToolboxData() (*toolboxData, error) {
 	tbxOnce.Do(func() {
 		if err := json.Unmarshal(toolboxJSON, &tbx); err != nil {
 			tbxErr = err
@@ -92,7 +93,7 @@ func (PayloadSearchTool) Execute(ctx context.Context, args map[string]any, tc *C
 			tokens = append(tokens, t)
 		}
 	}
-	d, err := toolbox()
+	d, err := ToolboxData()
 	if err != nil {
 		return "", Errorf("payload 库加载失败: %v", err)
 	}

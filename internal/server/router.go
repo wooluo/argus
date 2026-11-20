@@ -113,6 +113,39 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/poclib", a.PoclibStats)
 		apig.Put("/api/poclib/repos", a.PutPocRepos)
 		apig.Post("/api/poclib/sync", a.PoclibSync)
+
+		// Dashboard 域（蓝本 api/dashboard.py 的 stats 部分；approvals/graph/logs/sources 见 TODO）
+		apig.Get("/api/dashboard/stats", a.GetDashboard)
+		apig.Get("/api/stream", a.GetStream)
+
+		// Kali 域（蓝本 api/kali.py）
+		apig.Get("/api/kali/hosts", a.ListKaliHosts)
+		apig.Put("/api/kali/hosts", a.PutKaliHosts)
+		apig.Post("/api/kali/hosts/test", a.TestKaliHost)
+		apig.Get("/api/kali/hosts/{host_id}/metrics", a.KaliHostMetrics)
+		apig.Get("/api/kali/hosts/{host_id}/activity", a.KaliHostActivity)
+		apig.Delete("/api/kali/hosts/{host_id}", a.DeleteKaliHost)
+
+		// Nodes 域（dnslog 节点 CRUD；/api/nodes 的节点网 register/heartbeat 已在下方独立挂载，
+		// 与蓝本前缀冲突，故 dnslog 配置面挂 /api/nodes 下的 GET/PUT/test）
+		apig.Get("/api/nodes", a.ListNodes)
+		apig.Put("/api/nodes", a.PutNodes)
+		apig.Post("/api/nodes/test", a.TestNode)
+
+		// ScopeSentry 域（蓝本 api/scopesentry.py）
+		apig.Get("/api/scopesentry/config", a.GetScopeSentryConfig)
+		apig.Put("/api/scopesentry/config", a.PutScopeSentryConfig)
+		apig.Post("/api/scopesentry/test", a.ScopeSentryTest)
+		apig.Post("/api/scopesentry/projects/{project_id}/import", a.ScopeSentryImport)
+
+		// Templates 域（蓝本 api/templates.py）
+		apig.Get("/api/templates", a.ListTemplates)
+		apig.Post("/api/templates/upload", a.UploadTemplate)
+		apig.Get("/api/templates/{template_id}/content", a.GetTemplateContent)
+		apig.Delete("/api/templates/{template_id}", a.DeleteTemplate)
+
+		// Toolbox 域（蓝本 api/toolbox.py）
+		apig.Get("/api/toolbox", a.GetToolbox)
 	})
 
 	// 节点面 API（独立鉴权域；注册需管理 token 防开放注册）
