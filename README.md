@@ -145,3 +145,19 @@ go test ./...      # 测试
 ## License
 
 [MIT](LICENSE)
+
+## VPS 部署（一键）
+
+```bash
+# 1. Mac 上交叉编译（二进制已在仓库根目录）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o argus-server ./cmd/argus-server
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o argus-node ./cmd/argus-node
+
+# 2. 上传到 VPS
+scp argus-server argus-node deploy-vps.sh root@your-vps:~/
+
+# 3. VPS 上执行（自动配 systemd + 防火墙 + token）
+ssh root@your-vps "bash deploy-vps.sh"
+```
+
+脚本自动完成：安装二进制 → systemd 服务（开机自启/崩溃重启）→ **随机生成管理 token** → 防火墙规则（可配 IP 白名单）→ 健康检查 → 输出节点接入命令。
