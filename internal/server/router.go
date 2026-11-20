@@ -77,6 +77,28 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/settings/llm/preset-keys", a.GetPresetKeys)
 		apig.Put("/api/settings/llm/preset-keys", a.PutPresetKey)
 		apig.Get("/api/tools", a.ToolsStatus)
+
+		// Extension 域（蓝本 api/extension.py）
+		apig.Get("/api/agents", a.ListAgents)
+		apig.Get("/api/agents/builtin-prompt", a.BuiltinAgentPrompt)
+		apig.Put("/api/agents/{agent_id}", a.PutAgent)
+		apig.Get("/api/mcp", a.ListMCP)
+		apig.Put("/api/mcp", a.PutMCP)
+		apig.Delete("/api/mcp/{server_id}", a.DeleteMCP)
+		apig.Post("/api/mcp/{server_id}/test", a.TestMCP)
+		apig.Get("/api/skills", a.ListSkills)
+		apig.Post("/api/skills", a.CreateSkill)
+		apig.Put("/api/skills/{skill_id}", a.UpdateSkill)
+		apig.Get("/api/skills/{skill_id}/content", a.SkillContent)
+		apig.Delete("/api/skills/{skill_id}", a.DeleteSkill)
+		apig.Get("/api/notify/config", a.GetNotifyConfig)
+		apig.Put("/api/notify/config", a.PutNotifyConfig)
+		apig.Post("/api/notify/test", a.TestNotify)
+		apig.Get("/api/repeater/logs", a.RepeaterLogs)
+		apig.Post("/api/repeater/send", a.RepeaterSend)
+		apig.Get("/api/poclib", a.PoclibStats)
+		apig.Put("/api/poclib/repos", a.PutPocRepos)
+		apig.Post("/api/poclib/sync", a.PoclibSync)
 	})
 
 	// 节点面 API（独立鉴权域；注册需管理 token 防开放注册）
