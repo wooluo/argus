@@ -64,6 +64,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 				prr.Put("/", a.UpdateProject)
 				prr.Delete("/", a.DeleteProject)
 				prr.Post("/tasks", a.StartTask)
+				prr.Post("/tasks/start", a.StartTask) // 蓝本路径（前端 api.js 调用形态）
 				prr.Post("/findings", a.CreateFinding)
 				// 项目维度子列表（蓝本 /projects/{id}/tasks|assets|findings|traffic）
 				prr.Get("/tasks", withPID(a.ListTasks))
@@ -90,6 +91,15 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 				trr.Get("/", a.GetTask)
 				trr.Post("/stop", a.StopTask)
 				trr.Post("/intel", a.SubmitIntel) // 运行中情报注入
+				trr.Get("/logs", func(w http.ResponseWriter, r *http.Request) {
+					// 蓝本路径 /tasks/{id}/logs → 复用 ListAgentLogs（query 参数版）
+					q := r.URL.Query()
+					if q.Get("task_id") == "" {
+						q.Set("task_id", chi.URLParam(r, "id"))
+						r.URL.RawQuery = q.Encode()
+					}
+					a.ListAgentLogs(w, r)
+				})
 				trr.Get("/tree", a.DecisionTree)
 				trr.Get("/exploration", a.ExplorationGraph)
 			})
