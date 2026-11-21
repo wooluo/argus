@@ -6,7 +6,6 @@ package deploy
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -140,9 +139,9 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return nil
 	}
 
-	// 5.1 环境探测：逐条独立执行（实测单条组合命令 `for + $var` 在部分
-	// VPS shell 下零输出，导致误判"非 root 且无 sudo"）。每条最简无变量
-	// 无循环；echo 自检不过 = 远端 exec 输出通道异常，直接明确报错。
+	// 5.1 环境探测：实测该 VPS 非交互 shell 下部分外部命令零输出
+	//（echo/cat/chmod/uname 可用，id/systemctl/base64/管道/|| 全空）——
+	// 逐条探测 + 绝对路径兜底，shell/PATH 进步骤与失败信息。
 	probeOne := func(cmd string) string {
 		s, err := client.NewSession()
 		if err != nil {
@@ -155,43 +154,53 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		_ = runCmd(s, cmd, 15*time.Second)
 		return strings.TrimSpace(b.String())
 	}
-	if sanity := probeOne("echo PROBE_OK"); sanity != "PROBE_OK" {
-		return fail(fmt.Sprintf(
-			"远端命令无输出（echo 都不回显：sshd/shell 环境异常，echo 返回 %q）"+
-				"——检查 VPS 的登录 shell（cat /etc/passwd | grep %s）",
-			sanity, cfg.Username))
-	}
-	uid := probeOne("id -u")
-	sudoWork := probeOne("sudo -n true 2>/dev/null && echo SUDO_OK || echo SUDO_NO")
-	sysd := probeOne("systemctl --version 2>/dev/null | head -1")
-	b64 := probeOne("base64 --version 2>/dev/null | head -1 || echo NOBASE64")
-	isRoot := uid == "0"
-	hasSudo := strings.Contains(sudoWork, "SUDO_OK")
-	hasBase64 := !strings.Contains(b64, "NOBASE64") && b64 != ""
-	hasSystemd := sysd != ""
-	step(fmt.Sprintf("环境探测: uid=%s sudo=%v systemd=%q base64=%v",
-		orDefaultStr(uid, "?"), hasSudo, tools.Truncate(sysd, 40), hasBase64))
+	envInfo := probeOne(`echo "SHELL=$0 PATH=$PATH"`)
+	step("远端环境: " + tools.Truncate(envInfo, 160))
 
+	uid := probeOne("id -u")
+	if uid == "" {
+		uid = probeOne("/usr/bin/id -u")
+	}
+	if uid == "" {
+		uid = probeOne("/bin/id -u")
+	}
+	sysctlPath := ""
+	for _, p := range []string{"/usr/bin/systemctl", "/bin/systemctl", "/sbin/systemctl"} {
+		if ver := probeOne(p + " --version"); strings.Contains(ver, "systemd") {
+			sysctlPath = p
+			break
+		}
+	}
+	isRoot := uid == "0"
+	step(fmt.Sprintf("环境探测: uid=%q systemctl=%q", uid, orDefaultStr(sysctlPath, "未找到")))
+
+	if uid == "" && sysctlPath == "" {
+		return fail("远端 id/systemctl 均无输出（shell 环境异常）。远端环境: " + envInfo +
+			"\n请在 VPS 上执行 `echo $SHELL; echo $PATH; which systemctl` 并反馈结果")
+	}
+	if sysctlPath == "" {
+		return fail("远端无 systemctl（非 systemd 系统？）。远端环境: " + envInfo)
+	}
+
+	// 非 root 需可用 sudo（root 场景跳过——用户就是 root 时最稳）
 	sudo := ""
 	if !isRoot {
-		if !hasSudo {
+		sudoWork := probeOne("sudo -n true && echo SUDO_OK")
+		if !strings.Contains(sudoWork, "SUDO_OK") {
 			return fail(fmt.Sprintf(
-				"远端用户 %s 非 root（uid=%q）且 sudo 不可用（%s）——请用 root 登录部署，或给该用户配免密 sudo",
+				"远端用户 %s 非 root（uid=%q）且 sudo 不可用（%q）——请用 root 登录部署",
 				cfg.Username, uid, sudoWork))
 		}
 		sudo = "sudo "
 	}
-	if !hasSystemd {
-		return fail("远端无 systemctl（非 systemd 系统？）")
-	}
 
-	// 5.2 安装二进制
+	// 5.2 安装二进制：只用已验证可用的原语（cp + chmod，不依赖 install）
 	if err := runStep("安装二进制",
-		sudo+"install -m 755 /tmp/argus-node /usr/local/bin/argus-node"); err != nil {
+		sudo+"cp /tmp/argus-node /usr/local/bin/argus-node && chmod 755 /usr/local/bin/argus-node"); err != nil {
 		return fail(err.Error())
 	}
 
-	// 5.3 写 service 文件（base64 优先；无 base64 时逐行 printf 追加）
+	// 5.3 写 service：cat heredoc（纯 shell 机制 + cat，不依赖 base64/tee）
 	svc := fmt.Sprintf(`[Unit]
 Description=Argus Pentest Node
 After=network.target
@@ -208,39 +217,19 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 `, cfg.ServerURL, cfg.NodeName, cfg.NodeToken)
-	if hasBase64 {
-		svcB64 := base64.StdEncoding.EncodeToString([]byte(svc))
-		if err := runStep("写入 service（base64）",
-			fmt.Sprintf(`echo %s | base64 -d > /tmp/argus-node.service && %scp /tmp/argus-node.service /etc/systemd/system/argus-node.service`,
-				svcB64, sudo)); err != nil {
-			return fail(err.Error())
-		}
-	} else {
-		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-		if err := runStep("清空临时 service", sudo+"rm -f /tmp/argus-node.service"); err != nil {
-			return fail(err.Error())
-		}
-		for _, line := range strings.Split(strings.TrimRight(svc, "\n"), "\n") {
-			cmd := fmt.Sprintf("%sprintf '%%s\\n' %s >> /tmp/argus-node.service",
-				sudo, shellQuote(line))
-			if err := runStep("写入 service 行", cmd); err != nil {
-				return fail(err.Error())
-			}
-		}
-		if err := runStep("安装 service 文件",
-			sudo+"cp /tmp/argus-node.service /etc/systemd/system/argus-node.service"); err != nil {
-			return fail(err.Error())
-		}
+	if err := runStep("写入 service 文件",
+		sudo+"cat > /etc/systemd/system/argus-node.service << 'ARGUS_SVC_EOF'\n"+svc+"ARGUS_SVC_EOF"); err != nil {
+		return fail(err.Error())
 	}
 
-	// 5.4 systemd 三连
-	if err := runStep("daemon-reload", sudo+"systemctl daemon-reload"); err != nil {
+	// 5.4 systemd 三连（绝对路径，绕开 PATH 异常）
+	if err := runStep("daemon-reload", sudo+sysctlPath+" daemon-reload"); err != nil {
 		return fail(err.Error())
 	}
-	if err := runStep("enable 开机自启", sudo+"systemctl enable argus-node"); err != nil {
+	if err := runStep("enable 开机自启", sudo+sysctlPath+" enable argus-node"); err != nil {
 		return fail(err.Error())
 	}
-	if err := runStep("restart 启动服务", sudo+"systemctl restart argus-node"); err != nil {
+	if err := runStep("restart 启动服务", sudo+sysctlPath+" restart argus-node"); err != nil {
 		return fail(err.Error())
 	}
 	step("systemd 服务已创建并启动")
@@ -250,11 +239,11 @@ WantedBy=multi-user.target
 	if s3, err := client.NewSession(); err == nil {
 		var checkOut bytes.Buffer
 		s3.Stdout = &checkOut
-		_ = runCmd(s3, "systemctl is-active argus-node", 30*time.Second)
+		_ = runCmd(s3, sysctlPath+" is-active argus-node", 30*time.Second)
 		s3.Close()
 		status := strings.TrimSpace(checkOut.String())
 		if status != "active" {
-			return fail("服务未运行（状态: " + status + "）")
+			return fail("服务未运行（状态: " + status + "）——查日志: journalctl -u argus-node -n 20")
 		}
 		step("节点服务运行中")
 	}
