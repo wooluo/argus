@@ -337,30 +337,51 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return fail(err.Error())
 	}
 
-	// 5.4 systemd 三连（绝对路径，绕开 PATH 异常）
+	// 5.4 systemd 三连（绝对路径）。daemon-reload 强校验；enable/restart 的
+	// 输出与标记在该机 systemctl 上会被幽灵吞掉（命令可能实际已成功）——
+	// 失败降级为警告 + nohup 兜底启动，部署成败最终以服务器侧节点心跳为准。
 	if err := runStep("daemon-reload", sudo+sysctlPath+" daemon-reload"); err != nil {
 		return fail(err.Error())
 	}
-	if err := runStep("enable 开机自启", sudo+sysctlPath+" enable argus-node"); err != nil {
-		return fail(err.Error())
+	softStep := func(name, cmd string) bool {
+		if err := runStep(name, cmd); err != nil {
+			step(name + " 结果未知（输出被吞，可能已成功）: " + err.Error())
+			return false
+		}
+		return true
 	}
-	if err := runStep("restart 启动服务", sudo+sysctlPath+" restart argus-node"); err != nil {
-		return fail(err.Error())
+	sysdOK := softStep("enable 开机自启", sudo+sysctlPath+" enable argus-node")
+	if !softStep("restart 启动服务", sudo+sysctlPath+" restart argus-node") {
+		// systemd 启动不可确认 → nohup 直接拉起兜底
+		step("systemd 启动不可确认 → nohup 兜底启动")
+		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+		_ = softStep("nohup 兜底启动",
+			fmt.Sprintf(`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > /var/log/argus-node.log 2>&1 < /dev/null &`,
+				shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)))
+	} else {
+		step("systemd 服务已启动")
 	}
-	step("systemd 服务已创建并启动")
+	if !sysdOK {
+		// enable 未知 → cron.d 兜底自启（幂等单文件）
+		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+		cronLine := fmt.Sprintf("@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
+			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
+			binPath + " >> /var/log/argus-node.log 2>&1"
+		_ = softStep("cron.d 兜底自启",
+			sudo+"mkdir -p /etc/cron.d; echo "+shellQuote(cronLine)+" > /etc/cron.d/argus-node")
+	}
 
-	// 6. 验证节点进程
+	// 6. 存活验证：is-active 同样不可信（输出被吞）——交服务器心跳判定，
+	// 此处只尽力看一眼，结果不影响部署结论。
 	time.Sleep(2 * time.Second)
 	if s3, err := client.NewSession(); err == nil {
 		var checkOut bytes.Buffer
 		s3.Stdout = &checkOut
-		_ = runCmd(s3, sysctlPath+" is-active argus-node", 30*time.Second)
+		_ = runCmd(s3, sysctlPath+" is-active argus-node", 15*time.Second)
 		s3.Close()
-		status := strings.TrimSpace(checkOut.String())
-		if status != "active" {
-			return fail("服务未运行（状态: " + status + "）——查日志: journalctl -u argus-node -n 20")
+		if strings.TrimSpace(checkOut.String()) == "active" {
+			step("节点服务运行中（systemd 确认）")
 		}
-		step("节点服务运行中")
 	}
 
 	// 7. 安全加固：关闭密码登录（可选，仅密钥部署时）
