@@ -63,10 +63,10 @@ func (b *Bus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	b.serveSSE(w, r, r.URL.Query().Get("event"), nil)
 }
 
-// ServeSSETask: /api/stream/{task_id} — 单任务事件流
-// （data.task_id 或 data.id 等于该任务的事件；蓝本 api/stream.py）。
+// ServeSSETask: /api/stream/{task_id} — 单任务事件流（蓝本兼容：无名事件，
+// 前端 es.onmessage 只收无 event: 名的消息）。
 func (b *Bus) ServeSSETask(w http.ResponseWriter, r *http.Request, taskID int64) {
-	b.serveSSE(w, r, "", func(evt Event) bool {
+	b.serveSSEMode(w, r, "", func(evt Event) bool {
 		m, ok := evt.Data.(map[string]any)
 		if !ok {
 			return false
@@ -88,12 +88,18 @@ func (b *Bus) ServeSSETask(w http.ResponseWriter, r *http.Request, taskID int64)
 			}
 		}
 		return false
-	})
+	}, true)
 }
 
 // serveSSE SSE 主循环：nameFilter 订阅期过滤（空=全部），evtKeep 逐事件过滤（nil=全放行）。
 func (b *Bus) serveSSE(w http.ResponseWriter, r *http.Request,
 	nameFilter string, evtKeep func(Event) bool) {
+	b.serveSSEMode(w, r, nameFilter, evtKeep, false)
+}
+
+// serveSSEMode nameless=true 输出无名事件（蓝本 stream 兼容，前端 onmessage）。
+func (b *Bus) serveSSEMode(w http.ResponseWriter, r *http.Request,
+	nameFilter string, evtKeep func(Event) bool, nameless bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -129,7 +135,11 @@ func (b *Bus) serveSSE(w http.ResponseWriter, r *http.Request,
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Event, payload)
+			if nameless {
+				fmt.Fprintf(w, "data: %s\n\n", payload)
+			} else {
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Event, payload)
+			}
 			fl.Flush()
 		}
 	}

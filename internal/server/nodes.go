@@ -29,8 +29,8 @@ type NodeAPI struct {
 	DB       *sql.DB
 	Bus      eventsBus
 	NodeAuth *auth.NodeAuth
-	Admin    *auth.Middleware  // 管理鉴权（SSH 部署时下发的注册凭证 = 当前管理 token）
-	Tunnels  *TunnelManager    // SSH 隧道回连管理（NAT/内网 server 的节点回连通道）
+	Admin    *auth.Middleware // 管理鉴权（SSH 部署时下发的注册凭证 = 当前管理 token）
+	Tunnels  *TunnelManager   // SSH 隧道回连管理（NAT/内网 server 的节点回连通道）
 }
 
 // eventsBus: server 包内事件发布接口（events.Bus 实现）。
@@ -340,7 +340,7 @@ func extMCPEnabled(db *sql.DB) []mcpServer {
 }
 
 // agentOverride settings.agents 中指定角色的自定义 prompt / 步数覆盖
-//（hunt=自主模式 / staged=阶段模式；retester 在 retest.go 直接读）。
+// （hunt=自主模式 / staged=阶段模式；retester 在 retest.go 直接读）。
 func agentOverride(db *sql.DB, role string) (string, int) {
 	var saved []map[string]any
 	_ = json.Unmarshal([]byte(store.GetSetting(db, "agents")), &saved)
@@ -705,6 +705,17 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 	for _, l := range req.Logs {
 		_, _ = n.DB.Exec(`INSERT INTO agent_logs(task_id,stage,type,tool,content) SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM tasks WHERE id=?)`,
 			taskID, l.Stage, l.Tool, l.Tool, l.Content, taskID)
+		// 实时推送（蓝本 audit.emit：任务流无名事件，前端 onmessage 增量渲染）
+		n.Bus.Publish("task_log", map[string]any{
+			"task_id": taskID, "type": func() string {
+				if l.Tool != "" {
+					return l.Tool
+				}
+				return "log"
+			}(),
+			"data": map[string]any{"stage": l.Stage, "tool": l.Tool, "content": l.Content},
+			"time": store.Now(),
+		})
 	}
 	for _, t := range req.Traffic {
 		_, _ = n.DB.Exec(`INSERT INTO traffic_logs(project_id,task_id,method,url,request_body,status,response_snippet,source_tool)

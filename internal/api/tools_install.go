@@ -121,7 +121,7 @@ func installApt(pkg string) error {
 }
 
 // installPDTool 从 GitHub latest release 安装 projectdiscovery 工具
-//（API 查精确资产名——latest/download 短链的资产命名会过期）。
+// （API 查精确资产名——latest/download 短链的资产命名会过期）。
 func installPDTool(name string) error {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/projectdiscovery/%s/releases/latest", name)
 	cl := &http.Client{Timeout: 30 * time.Second}

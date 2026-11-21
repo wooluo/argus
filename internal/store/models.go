@@ -67,14 +67,14 @@ type Project struct {
 type Task struct {
 	ID           int     `json:"id"`
 	ProjectID    int     `json:"project_id"`
-	Name         string `json:"name"`
-	Status       string `json:"status"`
-	Mode         string `json:"mode"`
-	CurrentStage string `json:"current_stage"`
+	Name         string  `json:"name"`
+	Status       string  `json:"status"`
+	Mode         string  `json:"mode"`
+	CurrentStage string  `json:"current_stage"`
 	Tokens       RawJSON `json:"tokens"`
 	StagesDone   RawJSON `json:"stages_done"`
-	Message      string `json:"message"`
-	CreatedAt    string `json:"created_at"`
+	Message      string  `json:"message"`
+	CreatedAt    string  `json:"created_at"`
 	StartedAt    any     `json:"started_at"`
 	FinishedAt   any     `json:"finished_at"`
 	NodeID       int     `json:"node_id"`

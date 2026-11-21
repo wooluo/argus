@@ -14,14 +14,17 @@ const SAFETY_RULES = `## 安全与合规红线（必须遵守，违反即任务�
 // 内置系统提示词（用户 wooluo 2026-11-21 在 /agents 页撰写并实战验证后
 // 收录为出厂默认——六态证据分类 / 最小影响原则 / Think-Act-Observe-Update-
 // Decide 闭环 / 按目标形态选工具。自定义 Agent 仍可整体覆盖）。
+//
 //go:embed prompts/hunt.md
 var AUTONOMOUS_SYSTEM_PROMPT string
 
 // STAGED_SYSTEM_PROMPT 阶段模式系统提示词（%s = 阶段名占位符）。
+//
 //go:embed prompts/staged.md
 var STAGED_SYSTEM_PROMPT string
 
 // RETESTER_SYSTEM_PROMPT 复测判定系统提示词（api/retest.go 使用）。
+//
 //go:embed prompts/retester.md
 var RETESTER_SYSTEM_PROMPT string
 

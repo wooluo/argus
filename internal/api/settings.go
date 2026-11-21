@@ -159,7 +159,7 @@ func (a *API) PutLimits(w http.ResponseWriter, r *http.Request) {
 // 已存值与默认合并（缺字段补齐）。
 func limitsOrDefault(saved map[string]any) map[string]any {
 	def := map[string]any{
-		"max_agent_steps": 25,  // 阶段模式：每阶段 Agent 最大步数
+		"max_agent_steps":  25,  // 阶段模式：每阶段 Agent 最大步数
 		"autonomous_steps": 120, // 自主模式步数基准
 		"tool_timeout":     300, // 单次外部工具超时(秒)
 		"max_concurrency":  10,  // 自研模块并发

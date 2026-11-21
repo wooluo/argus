@@ -345,7 +345,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 			keepClient = true
 		}
 		return Result{
-			OK:  true,
+			OK: true,
 			Message: fmt.Sprintf("节点 %s 已启动（容器模式：nohup + cron.d 自启），等待其经隧道回连 %s",
 				cfg.NodeName, cfg.ServerURL),
 			Steps: steps, KeepClient: map[bool]*ssh.Client{true: client, false: nil}[cfg.Tunnel],
@@ -451,7 +451,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		keepClient = true
 	}
 	return Result{
-		OK:  true,
+		OK: true,
 		Message: fmt.Sprintf("节点 %s 部署成功，等待其%s回连 %s",
 			cfg.NodeName, map[bool]string{true: "经隧道", false: ""}[cfg.Tunnel], cfg.ServerURL),
 		Steps: steps, KeepClient: map[bool]*ssh.Client{true: client, false: nil}[cfg.Tunnel],

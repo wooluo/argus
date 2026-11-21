@@ -1,0 +1,1 @@
+登录后按模块遍历；sqli 用单引号触发+布尔对比；exec 用 ;id 回显验证；低难度先改 security.php
