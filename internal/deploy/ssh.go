@@ -79,17 +79,27 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	step("SSH 连接成功")
 
 	// probeOne 独立会话取命令输出（探测/上传校验通用；幽灵时返回空串）
+	// probeOne 执行探测命令并取输出。x/crypto SSH 客户端同连接快速开新会话时
+	// 存在间歇性输出丢失/损坏（实测 30 次约 4 次返回空或 \x00 字节），
+	// 输出无效（空或含 NUL）视为失败并重试。
 	probeOne := func(cmd string) string {
-		s, err := client.NewSession()
-		if err != nil {
-			return ""
+		for range 3 {
+			s, err := client.NewSession()
+			if err != nil {
+				return ""
+			}
+			var b bytes.Buffer
+			s.Stdout = &b
+			s.Stderr = &b
+			_ = runCmd(s, cmd, 15*time.Second)
+			s.Close()
+			out := strings.TrimSpace(b.String())
+			if out != "" && !strings.ContainsRune(out, 0) {
+				return out
+			}
+			time.Sleep(300 * time.Millisecond)
 		}
-		defer s.Close()
-		var b bytes.Buffer
-		s.Stdout = &b
-		s.Stderr = &b
-		_ = runCmd(s, cmd, 15*time.Second)
-		return strings.TrimSpace(b.String())
+		return ""
 	}
 
 	session, err := client.NewSession()
