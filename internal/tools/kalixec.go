@@ -137,6 +137,10 @@ func (KaliExecTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 		}
 		host = strings.SplitN(host, ";", 2)[0]
 		host = regexp.MustCompile(`[;&,|)]`).Split(host, -1)[0]
+		// shell 变量拼接剥离：signin.hworld.com$f 运行时 $f 展开为路径，
+		// 真实主机是 $ 前的域名——截断后校验（恶意拼接到域名的变量同理
+		// 校验其字面前缀，安全性不降）
+		host = regexp.MustCompile(`[$'\"\s]`).Split(host, -1)[0]
 		if host == "" || host == "127.0.0.1" || host == "localhost" {
 			continue
 		}
