@@ -32,13 +32,15 @@ type SSHConfig struct {
 	ServerURL  string `json:"server_url"`  // 节点回连地址
 	NodeToken  string `json:"node_token"`  // 节点注册 token
 	BinaryPath string `json:"binary_path"` // 本机 argus-node 二进制路径
+	Tunnel     bool   `json:"tunnel"`      // SSH 隧道回连（NAT/内网 server 推荐）
 }
 
 // Result 部署结果。
 type Result struct {
-	OK      bool     `json:"ok"`
-	Message string   `json:"message"`
-	Steps   []string `json:"steps,omitempty"`
+	OK         bool        `json:"ok"`
+	Message    string      `json:"message"`
+	Steps      []string    `json:"steps,omitempty"`
+	KeepClient *ssh.Client `json:"-"` // Tunnel 模式部署成功后移交的连接（server 接管建隧道）
 }
 
 // DeployProgress 部署步骤实时回调（server 侧转发 SSE；nil=不回调）。
@@ -70,12 +72,26 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		}
 	}
 
+	// 0. SSH 隧道回连模式：ServerURL 强制为远端本机隧道口
+	//（server 在 NAT/内网后，节点直连不可能通；部署连接上建 remote
+	// forward，节点连 VPS 本机 127.0.0.1:17887 经隧道回到 server）
+	if cfg.Tunnel {
+		cfg.ServerURL = TunnelServerURL
+		step("SSH 隧道回连模式：节点将连 " + cfg.ServerURL + "（经部署连接反向转发）")
+	}
+
 	// 1. 建立 SSH 连接
 	client, err := sshConnect(cfg)
 	if err != nil {
 		return fail(fmt.Sprintf("SSH 连接失败: %v", err))
 	}
-	defer client.Close()
+	// Tunnel 模式部署成功后连接移交 server 的隧道管理器——不在此关闭
+	keepClient := false
+	defer func() {
+		if !keepClient {
+			client.Close()
+		}
+	}()
 	step("SSH 连接成功")
 
 	// probeOne 独立会话取命令输出（探测/上传校验通用；幽灵时返回空串）
@@ -325,11 +341,14 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		}
 		// 验证交给 server 侧：节点 5s 内心跳注册（状态变在线即闭环）
 		step("节点已启动（nohup 模式，存活由服务器心跳确认）")
+		if cfg.Tunnel {
+			keepClient = true
+		}
 		return Result{
-			OK: true,
-			Message: fmt.Sprintf("节点 %s 已启动（容器模式：nohup + cron.d 自启；日志 /var/log/argus-node.log），等待其回连 %s",
+			OK:  true,
+			Message: fmt.Sprintf("节点 %s 已启动（容器模式：nohup + cron.d 自启），等待其经隧道回连 %s",
 				cfg.NodeName, cfg.ServerURL),
-			Steps: steps,
+			Steps: steps, KeepClient: map[bool]*ssh.Client{true: client, false: nil}[cfg.Tunnel],
 		}
 	}
 
@@ -428,12 +447,28 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		}
 	}
 
+	if cfg.Tunnel {
+		keepClient = true
+	}
 	return Result{
-		OK:      true,
-		Message: fmt.Sprintf("节点 %s 部署成功，已回连 %s", cfg.NodeName, cfg.ServerURL),
-		Steps:   steps,
+		OK:  true,
+		Message: fmt.Sprintf("节点 %s 部署成功，等待其%s回连 %s",
+			cfg.NodeName, map[bool]string{true: "经隧道", false: ""}[cfg.Tunnel], cfg.ServerURL),
+		Steps: steps, KeepClient: map[bool]*ssh.Client{true: client, false: nil}[cfg.Tunnel],
 	}
 }
+
+// TunnelRemoteAddr 隧道模式在远端 VPS 上监听的地址（节点连它=经隧道回 server）。
+const TunnelRemoteAddr = "127.0.0.1:17887"
+
+// TunnelServerAddr 隧道模式在本地转发的目标（argus-server 本机端口）。
+const TunnelServerAddr = "127.0.0.1:7887"
+
+// TunnelServerURL 隧道模式下写入节点配置的回连地址。
+const TunnelServerURL = "http://" + TunnelRemoteAddr
+
+// DialSSH 建立到远端的 SSH 连接（隧道管理器重连/恢复复用）。
+func DialSSH(cfg SSHConfig) (*ssh.Client, error) { return sshConnect(cfg) }
 
 // sshConnect 建立 SSH 连接（密码或密钥）。
 func sshConnect(cfg SSHConfig) (*ssh.Client, error) {

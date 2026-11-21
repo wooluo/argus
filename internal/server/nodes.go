@@ -29,7 +29,8 @@ type NodeAPI struct {
 	DB       *sql.DB
 	Bus      eventsBus
 	NodeAuth *auth.NodeAuth
-	Admin    *auth.Middleware // 管理鉴权（SSH 部署时下发的注册凭证 = 当前管理 token）
+	Admin    *auth.Middleware  // 管理鉴权（SSH 部署时下发的注册凭证 = 当前管理 token）
+	Tunnels  *TunnelManager    // SSH 隧道回连管理（NAT/内网 server 的节点回连通道）
 }
 
 // eventsBus: server 包内事件发布接口（events.Bus 实现）。
@@ -76,6 +77,7 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 		CreatedAt  string `json:"created_at"`
 		Host       string `json:"host"`
 		LastDeploy string `json:"last_deploy"` // 最近一次部署结果 JSON（ok/message/steps）
+		Tunnel     bool   `json:"tunnel"`      // SSH 隧道回连是否托管中
 	}
 	out := []nodeRow{}
 	for rows.Next() {
@@ -95,6 +97,9 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 					v.Status = "online"
 				}
 			}
+		}
+		if n.Tunnels != nil {
+			v.Tunnel = n.Tunnels.Status(v.Name)
 		}
 		out = append(out, v)
 	}
@@ -118,6 +123,11 @@ func (n *NodeAPI) DeleteExecNode(w http.ResponseWriter, r *http.Request) {
 	if running > 0 {
 		jerr(w, 400, "该节点有待执行/执行中任务，先停任务再删")
 		return
+	}
+	var nodeName string
+	_ = n.DB.QueryRow(`SELECT name FROM nodes WHERE id=?`, id).Scan(&nodeName)
+	if n.Tunnels != nil && nodeName != "" {
+		n.Tunnels.Remove(nodeName) // 撤隧道（远端监听随连接关闭释放）
 	}
 	res, err := n.DB.Exec(`DELETE FROM nodes WHERE id=?`, id)
 	if err != nil {
@@ -804,12 +814,23 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// BinaryPath 留空——Deploy 内部会检测远端架构自动选择
 
-	// 部署即上屏：预插 deploying 行（注册 UPSERT 激活），Web 界面立即可见
-	_, _ = n.DB.Exec(`
-		INSERT INTO nodes(name,token,platform,status,last_seen,host)
-		VALUES(?, '', '', 'deploying', '', ?)
-		ON CONFLICT(name) DO UPDATE SET status='deploying', last_seen='', host=excluded.host`,
-		req.NodeName, req.Host)
+	// 部署即上屏：预插 deploying 行（注册 UPSERT 激活），Web 界面立即可见；
+	// 隧道模式同步落 SSH 凭据（server 重启后 TunnelManager.Restore 恢复通道）
+	if req.Tunnel {
+		if b, err := json.Marshal(req); err == nil {
+			_, _ = n.DB.Exec(`
+				INSERT INTO nodes(name,token,platform,status,last_seen,host,tunnel_ssh)
+				VALUES(?, '', '', 'deploying', '', ?, ?)
+				ON CONFLICT(name) DO UPDATE SET status='deploying', last_seen='', host=excluded.host, tunnel_ssh=excluded.tunnel_ssh`,
+				req.NodeName, req.Host, string(b))
+		}
+	} else {
+		_, _ = n.DB.Exec(`
+			INSERT INTO nodes(name,token,platform,status,last_seen,host)
+			VALUES(?, '', '', 'deploying', '', ?)
+			ON CONFLICT(name) DO UPDATE SET status='deploying', last_seen='', host=excluded.host, tunnel_ssh=''`,
+			req.NodeName, req.Host)
+	}
 
 	// 异步部署（分步推送进度；panic/整体超时兜底——goroutine 卡死会让
 	// 状态永远「部署中」，实测踩过）
@@ -835,6 +856,22 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 			if b, err := json.Marshal(result); err == nil {
 				_, _ = n.DB.Exec(`UPDATE nodes SET last_deploy=? WHERE name=?`,
 					string(b), req.NodeName)
+			}
+			// 隧道模式：接管部署连接建 remote forward（节点连 VPS 本机
+			// 17887 经隧道回 server；看门狗自动重拨，重启后凭据恢复）
+			if result.OK && req.Tunnel && result.KeepClient != nil && n.Tunnels != nil {
+				if err := n.Tunnels.Attach(req.NodeName, req, result.KeepClient); err != nil {
+					n.Bus.Publish("node_deploy", map[string]any{
+						"node_name": req.NodeName, "partial": true,
+						"step": "⚠ 隧道建立失败: " + err.Error() + "（节点暂时无法回连，可重新部署）",
+					})
+				} else {
+					n.Bus.Publish("node_deploy", map[string]any{
+						"node_name": req.NodeName, "partial": true,
+						"step": "🔗 SSH 隧道已建立并托管（断线自动重连）: VPS " +
+							deploy.TunnelRemoteAddr + " → 本机 " + deploy.TunnelServerAddr,
+					})
+				}
 			}
 			n.Bus.Publish("node_deploy", map[string]any{
 				"node_name": req.NodeName, "host": req.Host, "result": result,

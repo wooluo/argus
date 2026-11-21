@@ -33,7 +33,9 @@ func main() {
 
 	// v0: Runner=nil，任务由 argus-node 领取执行（StartTask 检查 nil）
 	a := &api.API{DB: db, Bus: bus, Auth: am}
-	nodeAPI := &server.NodeAPI{DB: db, Bus: bus, NodeAuth: na, Admin: am}
+	tunnels := server.NewTunnelManager()
+	go tunnels.Restore(db) // 重启后按节点表存的 SSH 凭据恢复隧道回连
+	nodeAPI := &server.NodeAPI{DB: db, Bus: bus, NodeAuth: na, Admin: am, Tunnels: tunnels}
 	h := server.NewRouter(a, bus, am, na, nodeAPI, cfg.StaticDir)
 
 	log.Printf("argus-server listening on %s (data=%s, auth=%v)",
