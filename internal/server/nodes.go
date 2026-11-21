@@ -105,7 +105,7 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 // 注意：改名后节点自身携带旧名，重新注册会按旧名 UPSERT 出新行——重命名
 // 仅用于显示标注场景。
 // DeleteExecNode: DELETE /api/nodes/exec/{id} — 删除执行节点
-//（deploying/deploy_failed 残留行清理、下线节点移除；凭证立即失效）。
+// （deploying/deploy_failed 残留行清理、下线节点移除；凭证立即失效）。
 func (n *NodeAPI) DeleteExecNode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil || id <= 0 {

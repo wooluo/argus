@@ -483,18 +483,26 @@ func pickBinary(remoteArch string) string {
 	if goArch == "" {
 		return ""
 	}
-	candidates := []string{
-		fmt.Sprintf("argus-node-linux-%s", goArch),   // 交叉编译产物（优先）
-		fmt.Sprintf("argus-server-linux-%s", goArch), // 兼容（极端情况）
-	}
-	// 仅当 server 本身就是 Linux + 同架构时，通用名也可用
+	// shortcut: 永不回退 argus-server——那是管理面二进制，装上节点永远不注册
+	names := []string{fmt.Sprintf("argus-node-linux-%s", goArch)}
 	if runtime.GOOS == "linux" && runtime.GOARCH == goArch {
-		candidates = append(candidates, "argus-node", "/usr/local/bin/argus-node")
+		names = append(names, "argus-node")
 	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			abs, _ := filepath.Abs(c)
-			return abs
+	// systemd 启动时 CWD=/，须先查可执行文件同目录再查 CWD
+	dirs := []string{}
+	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Dir(exe))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, wd)
+	}
+	dirs = append(dirs, "/usr/local/bin")
+	for _, dir := range dirs {
+		for _, name := range names {
+			c := filepath.Join(dir, name)
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
 		}
 	}
 	return ""
