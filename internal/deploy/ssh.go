@@ -178,9 +178,6 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return fail("远端 id/systemctl 均无输出（shell 环境异常）。远端环境: " + envInfo +
 			"\n请在 VPS 上执行 `echo $SHELL; echo $PATH; which systemctl` 并反馈结果")
 	}
-	if sysctlPath == "" {
-		return fail("远端无 systemctl（非 systemd 系统？）。远端环境: " + envInfo)
-	}
 
 	// 非 root 需可用 sudo（root 场景跳过——用户就是 root 时最稳）
 	sudo := ""
@@ -198,6 +195,36 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	if err := runStep("安装二进制",
 		sudo+"cp /tmp/argus-node /usr/local/bin/argus-node && chmod 755 /usr/local/bin/argus-node"); err != nil {
 		return fail(err.Error())
+	}
+
+	// ── systemd 不可用（OpenVZ/LXC 容器常见）→ 降级 nohup + crontab 模式 ──
+	if sysctlPath == "" {
+		step("systemd 不可用（容器型 VPS？）→ 降级 nohup 后台 + crontab 自启")
+		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+		// env 前缀 + nohup + 后台 + 脱离会话（stdin/stdout 重定向防 SSH 退出牵连）
+		startCmd := fmt.Sprintf(
+			`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup /usr/local/bin/argus-node > /var/log/argus-node.log 2>&1 < /dev/null &`,
+			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))
+		if err := runStep("nohup 启动节点", startCmd); err != nil {
+			return fail(err.Error())
+		}
+		// 开机自启：/etc/crontab 追加 @reboot 行（cat/echo/>> 已验证可用；
+		// 失败不阻塞——节点已在跑，只是缺自启）
+		if err := runStep("crontab 自启",
+			fmt.Sprintf(`cat >> /etc/crontab << 'ARGUS_CRON_EOF'
+@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s /usr/local/bin/argus-node >> /var/log/argus-node.log 2>&1
+ARGUS_CRON_EOF`,
+				shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))); err != nil {
+			step("crontab 自启写入失败（不影响本次运行）: " + err.Error())
+		}
+		// 验证交给 server 侧：节点 5s 内心跳注册（状态变在线即闭环）
+		step("节点已启动（nohup 模式，存活由服务器心跳确认）")
+		return Result{
+			OK: true,
+			Message: fmt.Sprintf("节点 %s 已启动（容器模式：nohup + crontab 自启；日志 /var/log/argus-node.log），等待其回连 %s",
+				cfg.NodeName, cfg.ServerURL),
+			Steps: steps,
+		}
 	}
 
 	// 5.3 写 service：cat heredoc（纯 shell 机制 + cat，不依赖 base64/tee）
