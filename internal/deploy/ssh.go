@@ -41,13 +41,34 @@ type Result struct {
 	Steps   []string `json:"steps,omitempty"`
 }
 
+// DeployProgress 部署步骤实时回调（server 侧转发 SSE；nil=不回调）。
+type DeployProgress func(step string)
+
 // Deploy 通过 SSH 引导部署 argus-node 到远端机器。
-func Deploy(cfg SSHConfig) Result {
+// onStep：每完成一步回调（实时推送部署进度用）。
+func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	var steps []string
 	fail := func(msg string) Result {
 		return Result{OK: false, Message: msg, Steps: steps}
 	}
-	step := func(s string) { steps = append(steps, s) }
+	step := func(s string) {
+		steps = append(steps, s)
+		if onStep != nil {
+			onStep(s)
+		}
+	}
+	// runCmd 带超时执行（分步命令卡死会让状态永远「部署中」——实测踩过）
+	runCmd := func(s *ssh.Session, cmd string, timeout time.Duration) error {
+		done := make(chan error, 1)
+		go func() { done <- s.Run(cmd) }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(timeout):
+			_ = s.Signal(ssh.SIGKILL)
+			return fmt.Errorf("命令超时（>%s）: %.80s", timeout, cmd)
+		}
+	}
 
 	// 1. 建立 SSH 连接
 	client, err := sshConnect(cfg)
@@ -66,7 +87,7 @@ func Deploy(cfg SSHConfig) Result {
 	// 2. 检测远端系统与架构
 	var out bytes.Buffer
 	session.Stdout = &out
-	if err := session.Run("uname -s && uname -m"); err != nil {
+	if err := runCmd(session, "uname -s && uname -m", 20*time.Second); err != nil {
 		return fail(fmt.Sprintf("无法执行命令: %v", err))
 	}
 	uname := strings.TrimSpace(out.String())
@@ -92,7 +113,8 @@ func Deploy(cfg SSHConfig) Result {
 	cfg.BinaryPath = binaryPath
 	step("二进制: " + filepath.Base(binaryPath))
 
-	// 4. 上传二进制（通过 SSH cat 写入）
+	// 4. 上传二进制（通过 SSH cat 写入；7MB 家宽上传给足 3 分钟）
+	step("上传二进制（约 7MB，视上行带宽 10s-3min）…")
 	if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
 		return fail(fmt.Sprintf("上传二进制失败: %v", err))
 	}
@@ -100,7 +122,7 @@ func Deploy(cfg SSHConfig) Result {
 
 	// 5. 安装 + 配置 systemd + 启动——分步执行，每步独立报错（单条长命令
 	// 在部分 VPS 上出现过 exit 0 + 零输出 + 无 DEPLOY_OK 的幽灵失败，
-	// 无法定位；分步后失败信息精确到步骤和原始输出）。
+	// 无法定位；分步后失败信息精确到步骤和原始输出）。每步 120s 超时。
 	runStep := func(name, cmd string) error {
 		s, err := client.NewSession()
 		if err != nil {
@@ -110,7 +132,7 @@ func Deploy(cfg SSHConfig) Result {
 		var out bytes.Buffer
 		s.Stdout = &out
 		s.Stderr = &out
-		if err := s.Run(cmd); err != nil {
+		if err := runCmd(s, cmd, 120*time.Second); err != nil {
 			return fmt.Errorf("%s 失败: %v\n远端输出: %s", name, err,
 				tools.Truncate(out.String(), 1000))
 		}
@@ -123,7 +145,7 @@ func Deploy(cfg SSHConfig) Result {
 	if ps, err := client.NewSession(); err == nil {
 		ps.Stdout = &probeOut
 		ps.Stderr = &probeOut
-		_ = ps.Run(`id -u; for c in sudo base64 systemctl tee install; do command -v $c >/dev/null 2>&1 && echo "$c=yes" || echo "$c=NO"; done`)
+		_ = runCmd(ps, `id -u; for c in sudo base64 systemctl tee install; do command -v $c >/dev/null 2>&1 && echo "$c=yes" || echo "$c=NO"; done`, 30*time.Second)
 		ps.Close()
 	}
 	probe := probeOut.String()
@@ -206,28 +228,30 @@ WantedBy=multi-user.target
 
 	// 6. 验证节点进程
 	time.Sleep(2 * time.Second)
-	s3, _ := client.NewSession()
-	defer s3.Close()
-	var checkOut bytes.Buffer
-	s3.Stdout = &checkOut
-	_ = s3.Run("systemctl is-active argus-node")
-	status := strings.TrimSpace(checkOut.String())
-	if status != "active" {
-		return fail("服务未运行（状态: " + status + "）")
+	if s3, err := client.NewSession(); err == nil {
+		var checkOut bytes.Buffer
+		s3.Stdout = &checkOut
+		_ = runCmd(s3, "systemctl is-active argus-node", 30*time.Second)
+		s3.Close()
+		status := strings.TrimSpace(checkOut.String())
+		if status != "active" {
+			return fail("服务未运行（状态: " + status + "）")
+		}
+		step("节点服务运行中")
 	}
-	step("节点服务运行中")
 
 	// 7. 安全加固：关闭密码登录（可选，仅密钥部署时）
 	if cfg.AuthType == "key" && cfg.PrivateKey != "" {
-		s4, _ := client.NewSession()
-		defer s4.Close()
-		var secOut bytes.Buffer
-		s4.Stdout = &secOut
-		_ = s4.Run(`grep -q "PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null || (
-			sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config &&
-			sudo systemctl reload sshd && echo SSH_HARDENED)`)
-		if strings.Contains(secOut.String(), "SSH_HARDENED") {
-			step("SSH 已关闭密码登录")
+		if s4, err := client.NewSession(); err == nil {
+			var secOut bytes.Buffer
+			s4.Stdout = &secOut
+			_ = runCmd(s4, `grep -q "PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null || (
+		sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config &&
+		sudo systemctl reload sshd && echo SSH_HARDENED)`, 30*time.Second)
+			s4.Close()
+			if strings.Contains(secOut.String(), "SSH_HARDENED") {
+				step("SSH 已关闭密码登录")
+			}
 		}
 	}
 
@@ -273,7 +297,7 @@ func sshConnect(cfg SSHConfig) (*ssh.Client, error) {
 	return ssh.Dial("tcp", net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", port)), config)
 }
 
-// uploadFile 通过 SSH 会话将本地文件写入远端路径。
+// uploadFile 通过 SSH 会话将本地文件写入远端路径（3 分钟超时：7MB 家宽上行）。
 func uploadFile(client *ssh.Client, localPath, remotePath string) error {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
@@ -287,10 +311,20 @@ func uploadFile(client *ssh.Client, localPath, remotePath string) error {
 	session.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	session.Stderr = &stderr
-	if err := session.Run(fmt.Sprintf("cat > %s && chmod 755 %s", remotePath, remotePath)); err != nil {
-		return fmt.Errorf("写入远端: %v (stderr: %s)", err, stderr.String()[:min(200, stderr.Len())])
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Run(fmt.Sprintf("cat > %s && chmod 755 %s", remotePath, remotePath))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("写入远端: %v (stderr: %s)", err, stderr.String()[:min(200, stderr.Len())])
+		}
+		return nil
+	case <-time.After(3 * time.Minute):
+		_ = session.Signal(ssh.SIGKILL)
+		return fmt.Errorf("上传超时（>3min，上行带宽不足？）")
 	}
-	return nil
 }
 
 func min(a, b int) int {

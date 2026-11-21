@@ -810,18 +810,38 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 		ON CONFLICT(name) DO UPDATE SET status='deploying', last_seen='', host=excluded.host`,
 		req.NodeName, req.Host)
 
-	// 异步部署（SSH 可能 10-30 秒）
+	// 异步部署（分步推送进度；panic/整体超时兜底——goroutine 卡死会让
+	// 状态永远「部署中」，实测踩过）
 	go func() {
-		result := deploy.Deploy(req)
-		if !result.OK {
-			// 失败且节点尚未注册（仍 deploying）→ 标记部署失败（注册成功则保持 online）
-			_, _ = n.DB.Exec(
-				`UPDATE nodes SET status='deploy_failed' WHERE name=? AND status='deploying'`,
-				req.NodeName)
+		result := deploy.Result{OK: false, Message: "部署 goroutine 异常退出"}
+		defer func() {
+			if p := recover(); p != nil {
+				result = deploy.Result{OK: false, Message: fmt.Sprintf("部署内部错误: %v", p)}
+			}
+			if !result.OK {
+				_, _ = n.DB.Exec(
+					`UPDATE nodes SET status='deploy_failed' WHERE name=? AND status='deploying'`,
+					req.NodeName)
+			}
+			n.Bus.Publish("node_deploy", map[string]any{
+				"node_name": req.NodeName, "host": req.Host, "result": result,
+			})
+		}()
+		done := make(chan deploy.Result, 1)
+		go func() {
+			done <- deploy.DeployWithProgress(req, func(step string) {
+				n.Bus.Publish("node_deploy", map[string]any{
+					"node_name": req.NodeName, "host": req.Host,
+					"partial": true, "step": step,
+				})
+			})
+		}()
+		select {
+		case result = <-done:
+		case <-time.After(5 * time.Minute):
+			result = deploy.Result{OK: false,
+				Message: "部署整体超时（>5min）：SSH 链路过慢或远端无响应"}
 		}
-		n.Bus.Publish("node_deploy", map[string]any{
-			"node_name": req.NodeName, "host": req.Host, "result": result,
-		})
 	}()
 	jout(w, 200, map[string]any{
 		"ok": true, "message": "部署已启动（异步），结果将实时推送到节点列表",
