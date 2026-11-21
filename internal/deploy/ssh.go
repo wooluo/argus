@@ -337,12 +337,9 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return fail(err.Error())
 	}
 
-	// 5.4 systemd 三连（绝对路径）。daemon-reload 强校验；enable/restart 的
-	// 输出与标记在该机 systemctl 上会被幽灵吞掉（命令可能实际已成功）——
-	// 失败降级为警告 + nohup 兜底启动，部署成败最终以服务器侧节点心跳为准。
-	if err := runStep("daemon-reload", sudo+sysctlPath+" daemon-reload"); err != nil {
-		return fail(err.Error())
-	}
+	// 5.4 systemd 三连（绝对路径）——全系软化：该机 systemctl 的输出/标记/
+	// exit 码都会被幽灵随机吞（daemon-reload 上次 ✓ 这次空），命令可能实际
+	// 已成功。全部降级为警告 + 多路兜底，部署成败以服务器侧节点心跳为准。
 	softStep := func(name, cmd string) bool {
 		if err := runStep(name, cmd); err != nil {
 			step(name + " 结果未知（输出被吞，可能已成功）: " + err.Error())
@@ -350,7 +347,8 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		}
 		return true
 	}
-	sysdOK := softStep("enable 开机自启", sudo+sysctlPath+" enable argus-node")
+	sysdOK := softStep("daemon-reload", sudo+sysctlPath+" daemon-reload") &&
+		softStep("enable 开机自启", sudo+sysctlPath+" enable argus-node")
 	if !softStep("restart 启动服务", sudo+sysctlPath+" restart argus-node") {
 		// systemd 启动不可确认 → nohup 直接拉起兜底
 		step("systemd 启动不可确认 → nohup 兜底启动")
