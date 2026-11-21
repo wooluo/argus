@@ -115,6 +115,7 @@ func (a *API) ListFindings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.ReadAt = readAt.value()
+		f.MarkUnread()
 		out = append(out, f)
 	}
 	respondJSON(w, 200, out)

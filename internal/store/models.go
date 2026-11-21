@@ -112,7 +112,12 @@ type Finding struct {
 	ReadAt    any    `json:"read_at"`
 	Source    string `json:"source"`
 	CreatedAt string `json:"created_at"`
+	// Unread 未读标记（蓝本契约：read_at is None；发现页徽标/已读逻辑依赖）
+	Unread bool `json:"unread"`
 }
+
+// MarkUnread 按 read_at 计算 unread（列表响应前调用）。
+func (f *Finding) MarkUnread() { f.Unread = f.ReadAt == nil }
 
 type AgentLog struct {
 	ID            int     `json:"id"`
