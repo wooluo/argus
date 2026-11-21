@@ -299,6 +299,7 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		"intel": intel, "skills": skillsBlock, "mcp": mcpServers,
 		"agent":            map[string]any{"prompt": agentPrompt, "max_steps": agentMaxSteps},
 		"fofa":             map[string]any{"email": fofaEmail, "key": fofaKey},
+		"github_token":     store.GetSetting(n.DB, "github_token"),
 		"continue_summary": continueSummary})
 }
 

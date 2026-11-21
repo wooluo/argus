@@ -36,7 +36,7 @@ var STAGE_NAMES = map[string]string{
 // STAGE_TOOLS 阶段 → 可用工具名（原版各工具 stages 声明聚合）。
 var STAGE_TOOLS = map[string][]string{
 	"recon": {"host_discovery", "subfinder", "http_alive", "httpx_probe",
-		"osint_lookup", "web_login", "http_fetch", "kali_exec", "kali_install",
+		"osint_lookup", "fofa_search", "web_login", "http_fetch", "kali_exec", "kali_install",
 		"run_script", "knowledge_save", "knowledge_search", "msf_search",
 		"github_search", "github_fetch", "exploitdb_search"},
 	"mapping": {"host_discovery", "http_alive", "httpx_probe", "nmap_scan",

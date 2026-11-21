@@ -48,7 +48,13 @@ func (GithubSearchTool) Execute(ctx context.Context, args map[string]any, tc *Co
 	if stype != "repos" && stype != "code" {
 		stype = "repos"
 	}
+	// token 来源：server 经 Poll 下发（Extra）优先，环境变量兜底
 	token := os.Getenv("GITHUB_TOKEN")
+	if tc != nil && tc.Extra != nil {
+		if v, _ := tc.Extra["github_token"].(string); v != "" {
+			token = v
+		}
+	}
 	if stype == "code" && token == "" {
 		return "", Errorf("code 搜索需要 GitHub Token（环境变量 GITHUB_TOKEN）；repos 搜索无需登录")
 	}

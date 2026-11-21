@@ -42,9 +42,10 @@ type Brief struct {
 	// 自定义 Agent（hunt 角色覆盖：prompt 非空时替换内置系统提示词；步数>0 时覆盖预算）。
 	AgentPrompt   string `json:"agent_prompt"`
 	AgentMaxSteps int    `json:"agent_max_steps"`
-	// FOFA 凭据（server 设置页下发，覆盖节点环境变量）。
-	FOFAEmail string `json:"fofa_email"`
-	FOFAKey   string `json:"fofa_key"`
+	// FOFA / GitHub 凭据（server 设置页下发，覆盖节点环境变量）。
+	FOFAEmail   string `json:"fofa_email"`
+	FOFAKey     string `json:"fofa_key"`
+	GitHubToken string `json:"github_token"`
 	// 断点续测：continue_from 指定任务的历史成果摘要（server 生成下发）。
 	ContinueSummary string `json:"continue_summary"`
 }
