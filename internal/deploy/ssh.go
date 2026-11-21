@@ -68,6 +68,19 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 			return fmt.Errorf("命令超时（>%s）: %.80s", timeout, cmd)
 		}
 	}
+	// probeOne 独立会话取命令输出（探测/校验通用；幽灵时返回空串）
+	probeOne := func(cmd string) string {
+		s, err := client.NewSession()
+		if err != nil {
+			return ""
+		}
+		defer s.Close()
+		var b bytes.Buffer
+		s.Stdout = &b
+		s.Stderr = &b
+		_ = runCmd(s, cmd, 15*time.Second)
+		return strings.TrimSpace(b.String())
+	}
 
 	// 1. 建立 SSH 连接
 	client, err := sshConnect(cfg)
@@ -112,12 +125,42 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	cfg.BinaryPath = binaryPath
 	step("二进制: " + filepath.Base(binaryPath))
 
-	// 4. 上传二进制（通过 SSH cat 写入；7MB 家宽上传给足 3 分钟）
+	// 4. 上传二进制（cat 写入，7MB 给足 3 分钟）+ 字节数校验
+	//（幽灵会吞掉上传错误导致 exit 0 假成功——校验远端实际字节数，
+	// 不符自动重传一次；wc 无输出时尽力而为放行）
 	step("上传二进制（约 7MB，视上行带宽 10s-3min）…")
-	if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
-		return fail(fmt.Sprintf("上传二进制失败: %v", err))
+	localSize := int64(0)
+	if st, err := os.Stat(cfg.BinaryPath); err == nil {
+		localSize = st.Size()
 	}
-	step("二进制已上传")
+	verifyUpload := func() bool {
+		if localSize == 0 {
+			return true
+		}
+		ns := strings.Fields(probeOne("wc -c < /tmp/argus-node"))
+		if len(ns) == 0 {
+			return true // 幽灵无输出 → 放行
+		}
+		if v, err := strconv.ParseInt(ns[0], 10, 64); err == nil && v != localSize {
+			step(fmt.Sprintf("远端字节数 %d ≠ 本地 %d（上传不完整）", v, localSize))
+			return false
+		}
+		return true
+	}
+	if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
+		step("上传报错: " + err.Error())
+	}
+	if !verifyUpload() {
+		step("校验不符，重传一次…")
+		if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
+			return fail(fmt.Sprintf("重传失败: %v", err))
+		}
+		if !verifyUpload() {
+			return fail(fmt.Sprintf("二进制字节数校验仍不符（本地 %d；磁盘满？/tmp 受限？"+
+				"——远端执行 df -h /tmp 自查）", localSize))
+		}
+	}
+	step("二进制已上传（字节数校验通过）")
 
 	// 5. 安装 + 配置 systemd + 启动——分步执行 + echo 标记判定 + 失败重试。
 	// 该 VPS 的 exec 通道存在间歇性幽灵（外部命令输出/exit 码随机丢失，
@@ -162,18 +205,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	// 5.1 环境探测：实测该 VPS 非交互 shell 下部分外部命令零输出
 	//（echo/cat/chmod/uname 可用，id/systemctl/base64/管道/|| 全空）——
 	// 逐条探测 + 绝对路径兜底，shell/PATH 进步骤与失败信息。
-	probeOne := func(cmd string) string {
-		s, err := client.NewSession()
-		if err != nil {
-			return ""
-		}
-		defer s.Close()
-		var b bytes.Buffer
-		s.Stdout = &b
-		s.Stderr = &b
-		_ = runCmd(s, cmd, 15*time.Second)
-		return strings.TrimSpace(b.String())
-	}
+	//（probeOne 已在开头定义）
 	envInfo := probeOne(`echo "SHELL=$0 PATH=$PATH"`)
 	step("远端环境: " + tools.Truncate(envInfo, 160))
 
@@ -218,12 +250,25 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		sudo = "sudo "
 	}
 
-	// 5.2 安装二进制：mkdir 兜底（minimal 容器可能没有 /usr/local/bin）+
-	// cp + chmod（只用已验证可用的原语）
-	if err := runStep("安装二进制",
-		sudo+"mkdir -p /usr/local/bin && cp /tmp/argus-node /usr/local/bin/argus-node && chmod 755 /usr/local/bin/argus-node"); err != nil {
-		return fail(err.Error())
+	// 5.2 安装二进制：目录降级尝试（/usr/local/bin 挂载异常时换
+	// /opt/argus、/root），每目录内 mkdir / cp / chmod 独立标记。
+	binPath := ""
+	for _, dir := range []string{"/usr/local/bin", "/opt/argus", "/root"} {
+		if err := runStep("mkdir "+dir, sudo+"mkdir -p "+dir); err != nil {
+			continue
+		}
+		if err := runStep("cp → "+dir,
+			sudo+"cp /tmp/argus-node "+dir+"/argus-node && chmod 755 "+dir+"/argus-node"); err != nil {
+			continue
+		}
+		binPath = dir + "/argus-node"
+		break
 	}
+	if binPath == "" {
+		return fail("二进制安装失败（/usr/local/bin、/opt/argus、/root 均不可写？" +
+			"——远端执行 df -h 与 ls -ld /usr/local/bin 自查")
+	}
+	step("二进制已安装: " + binPath)
 
 	// ── systemd 不可用（OpenVZ/LXC 容器常见）→ 降级 nohup + crontab 模式 ──
 	if sysctlPath == "" {
@@ -231,7 +276,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 		// env 前缀 + nohup + 后台 + 脱离会话（stdin/stdout 重定向防 SSH 退出牵连）
 		startCmd := fmt.Sprintf(
-			`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup /usr/local/bin/argus-node > /var/log/argus-node.log 2>&1 < /dev/null &`,
+			`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > /var/log/argus-node.log 2>&1 < /dev/null &`,
 			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))
 		if err := runStep("nohup 启动节点", startCmd); err != nil {
 			return fail(err.Error())
@@ -240,7 +285,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		// 失败不阻塞——节点已在跑，只是缺自启）
 		if err := runStep("crontab 自启",
 			fmt.Sprintf(`cat >> /etc/crontab << 'ARGUS_CRON_EOF'
-@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s /usr/local/bin/argus-node >> /var/log/argus-node.log 2>&1
+@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s `+binPath+` >> /var/log/argus-node.log 2>&1
 ARGUS_CRON_EOF`,
 				shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))); err != nil {
 			step("crontab 自启写入失败（不影响本次运行）: " + err.Error())
@@ -265,7 +310,7 @@ Type=simple
 Environment=ARGUS_SERVER=%s
 Environment=ARGUS_NAME=%s
 Environment=ARGUS_TOKEN=%s
-ExecStart=/usr/local/bin/argus-node
+ExecStart=`+binPath+`
 Restart=always
 RestartSec=5
 
