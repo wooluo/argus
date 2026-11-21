@@ -276,8 +276,12 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		mcpServers = append(mcpServers, s)
 	}
 
-	// 自定义 Agent（hunt 角色覆盖：prompt + 步数）
-	agentPrompt, agentMaxSteps := huntAgentOverride(n.DB)
+	// 自定义 Agent 覆盖（按任务模式取角色：autonomous→hunt / staged→staged）
+	agentRole := "hunt"
+	if t.Mode == "staged" {
+		agentRole = "staged"
+	}
+	agentPrompt, agentMaxSteps := agentOverride(n.DB, agentRole)
 
 	// FOFA 凭据（设置页配置；未配置时空串，节点回落环境变量）
 	fofaEmail, fofaKey := store.GetSetting(n.DB, "fofa_email"), store.GetSetting(n.DB, "fofa_key")
@@ -334,12 +338,13 @@ func extMCPEnabled(db *sql.DB) []mcpServer {
 	return out
 }
 
-// huntAgentOverride settings.agents 中 hunt 角色的自定义 prompt / 步数覆盖。
-func huntAgentOverride(db *sql.DB) (string, int) {
+// agentOverride settings.agents 中指定角色的自定义 prompt / 步数覆盖
+//（hunt=自主模式 / staged=阶段模式；retester 在 retest.go 直接读）。
+func agentOverride(db *sql.DB, role string) (string, int) {
 	var saved []map[string]any
 	_ = json.Unmarshal([]byte(store.GetSetting(db, "agents")), &saved)
 	for _, s := range saved {
-		if id, _ := s["id"].(string); id != "hunt" {
+		if id, _ := s["id"].(string); id != role {
 			continue
 		}
 		prompt, _ := s["prompt"].(string)

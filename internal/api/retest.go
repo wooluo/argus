@@ -202,8 +202,11 @@ func (a *API) RetestFinding(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// LLM 三选一判定（Agent 管理页 retester 自定义提示词可覆盖 system）
+	// LLM 三选一判定（Agent 管理页 retester 自定义提示词覆盖 system）
 	system := "你是漏洞复测判定专家。"
+	if custom := agentPromptSetting(a.DB, "retester"); custom != "" {
+		system = custom
+	}
 	if custom := strings.TrimSpace(a.retesterPrompt()); custom != "" {
 		system = custom
 	}
@@ -267,6 +270,20 @@ func (a *API) retesterPrompt() string {
 		if fmt.Sprint(ag["id"]) == "retester" {
 			p, _ := ag["prompt"].(string)
 			return p
+		}
+	}
+	return ""
+}
+
+// agentPromptSetting settings.agents 中指定角色的自定义 prompt（空=用内置）。
+func agentPromptSetting(db *sql.DB, role string) string {
+	var saved []map[string]any
+	_ = json.Unmarshal([]byte(store.GetSetting(db, "agents")), &saved)
+	for _, s := range saved {
+		if id, _ := s["id"].(string); id == role {
+			if p, _ := s["prompt"].(string); strings.TrimSpace(p) != "" {
+				return p
+			}
 		}
 	}
 	return ""

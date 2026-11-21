@@ -32,8 +32,13 @@ func runStaged(ctx context.Context, b Brief, tc *tools.Context, rep *memReporter
 				res.Status, res.Message = "failed", "阶段 "+stage+" 无可用工具"
 				return
 			}
+			// 每阶段步数：蓝本 limits.max_agent_steps（默认 25），自定义 Agent 可覆盖
+			stageSteps := 25
+			if b.AgentMaxSteps > 0 {
+				stageSteps = b.AgentMaxSteps
+			}
 			a := agent.New(client, agent.Options{
-				TaskID: b.TaskID, Stage: stage, ContextLimit: 40, MaxSteps: 120,
+				TaskID: b.TaskID, Stage: stage, ContextLimit: 40, MaxSteps: stageSteps,
 			}, toolSet, tc)
 			out, err := a.Run(ctx, system, brief)
 			if err != nil {
@@ -77,8 +82,17 @@ func toolsForStage(stage string) []tools.Tool {
 
 // stagePrompts 阶段提示词（移植 _stage_prompts）。
 func stagePrompts(stage string, b Brief, rep *memReporter) (system, brief string) {
-	system = fmt.Sprintf(STAGED_SYSTEM_PROMPT, STAGE_NAMES[stage]) + SAFETY_RULES
+	// 自定义 Agent（staged 角色）覆盖：%s 占位符注入阶段名，安全红线保留
+	if strings.TrimSpace(b.AgentPrompt) != "" {
+		return strings.ReplaceAll(b.AgentPrompt, "%s", STAGE_NAMES[stage]) + "\n\n" + SAFETY_RULES,
+			stagedBrief(stage, b, rep)
+	}
+	return fmt.Sprintf(STAGED_SYSTEM_PROMPT, STAGE_NAMES[stage]) + SAFETY_RULES,
+		stagedBrief(stage, b, rep)
+}
 
+// stagedBrief 阶段任务书（内置/自定义 system 共用）。
+func stagedBrief(stage string, b Brief, rep *memReporter) string {
 	ips, domains := classifyScope(b)
 	scopeDesc := scopeDescOf(b)
 	var scopeLines []string
@@ -132,7 +146,7 @@ func stagePrompts(stage string, b Brief, rep *memReporter) (system, brief string
 			"3. 排除明显误报（如 WAF 页面误判、通用告警）\n" +
 			"4. 总结：确认漏洞清单与误报数量",
 	}
-	return system, goals[stage] + common
+	return goals[stage] + common
 }
 
 // reconGoal 侦察阶段目标（按范围形态分派）。
