@@ -59,28 +59,29 @@ func genNodeToken() string {
 
 // ListNodes: GET /api/nodes/ （管理面，UI 用）
 func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
-	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at,host FROM nodes ORDER BY id`)
+	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at,host,last_deploy FROM nodes ORDER BY id`)
 	if err != nil {
 		jerr(w, 500, err.Error())
 		return
 	}
 	defer rows.Close()
 	type nodeRow struct {
-		ID        int    `json:"id"`
-		Name      string `json:"name"`
-		Platform  string `json:"platform"`
-		Hostname  string `json:"hostname"`
-		Version   string `json:"version"`
-		Status    string `json:"status"`
-		LastSeen  string `json:"last_seen"`
-		CreatedAt string `json:"created_at"`
-		Host      string `json:"host"`
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Platform   string `json:"platform"`
+		Hostname   string `json:"hostname"`
+		Version    string `json:"version"`
+		Status     string `json:"status"`
+		LastSeen   string `json:"last_seen"`
+		CreatedAt  string `json:"created_at"`
+		Host       string `json:"host"`
+		LastDeploy string `json:"last_deploy"` // 最近一次部署结果 JSON（ok/message/steps）
 	}
 	out := []nodeRow{}
 	for rows.Next() {
 		var v nodeRow
 		if err := rows.Scan(&v.ID, &v.Name, &v.Platform, &v.Hostname, &v.Version,
-			&v.Status, &v.LastSeen, &v.CreatedAt, &v.Host); err != nil {
+			&v.Status, &v.LastSeen, &v.CreatedAt, &v.Host, &v.LastDeploy); err != nil {
 			jerr(w, 500, err.Error())
 			return
 		}
@@ -822,6 +823,11 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 				_, _ = n.DB.Exec(
 					`UPDATE nodes SET status='deploy_failed' WHERE name=? AND status='deploying'`,
 					req.NodeName)
+			}
+			// 部署结果落库（SSE 即发即焚，落库后可回查/排障）
+			if b, err := json.Marshal(result); err == nil {
+				_, _ = n.DB.Exec(`UPDATE nodes SET last_deploy=? WHERE name=?`,
+					string(b), req.NodeName)
 			}
 			n.Bus.Publish("node_deploy", map[string]any{
 				"node_name": req.NodeName, "host": req.Host, "result": result,
