@@ -90,6 +90,17 @@ func (n *NodeAuth) Remove(token string) {
 	n.mu.Unlock()
 }
 
+// RemoveByNode 清除指定节点的全部凭证（删除节点时调用，令其 token 立即失效）。
+func (n *NodeAuth) RemoveByNode(nodeID int64) {
+	n.mu.Lock()
+	for tok, id := range n.tokens {
+		if id == nodeID {
+			delete(n.tokens, tok)
+		}
+	}
+	n.mu.Unlock()
+}
+
 // Check 返回 nodeID；未注册返回 0。
 func (n *NodeAuth) Check(r *http.Request) int64 {
 	h := r.Header.Get("Authorization")
