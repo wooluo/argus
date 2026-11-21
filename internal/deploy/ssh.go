@@ -272,9 +272,9 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	}
 	step("二进制已安装: " + binPath)
 
-	// ── systemd 不可用（OpenVZ/LXC 容器常见）→ 降级 nohup + crontab 模式 ──
+	// ── systemd 不可用（OpenVZ/LXC 容器常见）→ 降级 nohup + cron.d 模式 ──
 	if sysctlPath == "" {
-		step("systemd 不可用（容器型 VPS？）→ 降级 nohup 后台 + crontab 自启")
+		step("systemd 不可用（容器型 VPS？）→ 降级 nohup 后台 + cron.d 自启")
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 		// env 前缀 + nohup + 后台 + 脱离会话（stdin/stdout 重定向防 SSH 退出牵连）
 		startCmd := fmt.Sprintf(
@@ -283,44 +283,57 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		if err := runStep("nohup 启动节点", startCmd); err != nil {
 			return fail(err.Error())
 		}
-		// 开机自启：/etc/crontab 追加 @reboot 行（cat/echo/>> 已验证可用；
-		// 失败不阻塞——节点已在跑，只是缺自启）
-		if err := runStep("crontab 自启",
-			fmt.Sprintf(`cat >> /etc/crontab << 'ARGUS_CRON_EOF'
-@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s `+binPath+` >> /var/log/argus-node.log 2>&1
-ARGUS_CRON_EOF`,
-				shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))); err != nil {
-			step("crontab 自启写入失败（不影响本次运行）: " + err.Error())
+		// 开机自启：/etc/cron.d/argus-node 单文件覆盖写（heredoc 在远端 sh
+		// 兼容层 exit 2——echo 单行 + 重定向最稳；幂等不堆行；失败不阻塞）
+		cronLine := fmt.Sprintf("@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
+			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
+			binPath + " >> /var/log/argus-node.log 2>&1"
+		if err := runStep("cron.d 自启",
+			sudo+"mkdir -p /etc/cron.d; echo "+shellQuote(cronLine)+" > /etc/cron.d/argus-node"); err != nil {
+			step("cron.d 自启写入失败（不影响本次运行）: " + err.Error())
 		}
 		// 验证交给 server 侧：节点 5s 内心跳注册（状态变在线即闭环）
 		step("节点已启动（nohup 模式，存活由服务器心跳确认）")
 		return Result{
 			OK: true,
-			Message: fmt.Sprintf("节点 %s 已启动（容器模式：nohup + crontab 自启；日志 /var/log/argus-node.log），等待其回连 %s",
+			Message: fmt.Sprintf("节点 %s 已启动（容器模式：nohup + cron.d 自启；日志 /var/log/argus-node.log），等待其回连 %s",
 				cfg.NodeName, cfg.ServerURL),
 			Steps: steps,
 		}
 	}
 
-	// 5.3 写 service：cat heredoc（纯 shell 机制 + cat，不依赖 base64/tee）
-	svc := fmt.Sprintf(`[Unit]
-Description=Argus Pentest Node
-After=network.target
-
-[Service]
-Type=simple
-Environment=ARGUS_SERVER=%s
-Environment=ARGUS_NAME=%s
-Environment=ARGUS_TOKEN=%s
-ExecStart=`+binPath+`
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`, cfg.ServerURL, cfg.NodeName, cfg.NodeToken)
-	if err := runStep("写入 service 文件",
-		sudo+"cat > /etc/systemd/system/argus-node.service << 'ARGUS_SVC_EOF'\n"+svc+"ARGUS_SVC_EOF"); err != nil {
+	// 5.3 写 service：echo 逐行（heredoc 在远端 sh 兼容层下 exit 2 语法错——
+	// Ubuntu /bin/sh=dash，括号+heredoc 组合挑剔；echo 内建 + `;` 链 + cp
+	// 从未失手。/etc/systemd/system 同 minimal 容器缺失风险 → mkdir 兜底）
+	shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	svcLines := []string{
+		"[Unit]",
+		"Description=Argus Pentest Node",
+		"After=network.target",
+		"",
+		"[Service]",
+		"Type=simple",
+		"Environment=ARGUS_SERVER=" + cfg.ServerURL,
+		"Environment=ARGUS_NAME=" + cfg.NodeName,
+		"Environment=ARGUS_TOKEN=" + cfg.NodeToken,
+		"ExecStart=" + binPath,
+		"Restart=always",
+		"RestartSec=5",
+		"",
+		"[Install]",
+		"WantedBy=multi-user.target",
+	}
+	var svcCmd strings.Builder
+	svcCmd.WriteString(sudo + "mkdir -p /etc/systemd/system; ")
+	for i, line := range svcLines {
+		op := ">>"
+		if i == 0 {
+			op = ">"
+		}
+		svcCmd.WriteString("echo " + shellQuote(line) + " " + op + " /tmp/argus-node.service; ")
+	}
+	svcCmd.WriteString(sudo + "cp /tmp/argus-node.service /etc/systemd/system/argus-node.service")
+	if err := runStep("写入 service 文件", svcCmd.String()); err != nil {
 		return fail(err.Error())
 	}
 
