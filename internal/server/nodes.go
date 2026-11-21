@@ -823,6 +823,13 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 				_, _ = n.DB.Exec(
 					`UPDATE nodes SET status='deploy_failed' WHERE name=? AND status='deploying'`,
 					req.NodeName)
+			} else {
+				// 部署成功但节点尚未回连注册——deploying 转 offline
+				//（「已装好、等回连」；注册 UPSERT 转 online。ServerURL 不可达
+				// 时停在 offline 而非误导性的「部署中」）
+				_, _ = n.DB.Exec(
+					`UPDATE nodes SET status='offline' WHERE name=? AND status='deploying'`,
+					req.NodeName)
 			}
 			// 部署结果落库（SSE 即发即焚，落库后可回查/排障）
 			if b, err := json.Marshal(result); err == nil {
