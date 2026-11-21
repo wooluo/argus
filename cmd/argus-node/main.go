@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -66,16 +67,23 @@ func main() {
 	go func() {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
+		var running atomic.Bool // 执行异步化：长任务不再阻塞心跳（否则界面显示离线）
 		for range t.C {
 			if !heartbeat() {
 				_ = registerAndSave(tokFile)
 			}
-			// 每次心跳后最多连做 3 个任务
-			for i := 0; i < 3; i++ {
-				if !pollAndRun() {
-					break
-				}
+			if !running.CompareAndSwap(false, true) {
+				continue // 上一个任务还在执行
 			}
+			go func() {
+				defer running.Store(false)
+				// 每次心跳后最多连做 3 个任务
+				for i := 0; i < 3; i++ {
+					if !pollAndRun() {
+						break
+					}
+				}
+			}()
 		}
 	}()
 

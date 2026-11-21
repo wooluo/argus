@@ -678,7 +678,7 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 	}
 	for _, s := range req.Assets {
 		if _, err := n.DB.Exec(`INSERT INTO assets(project_id,type,value,detail,source)
-			SELECT project_id,?,?,?,?,'node' FROM tasks WHERE id=?`,
+			SELECT project_id,?,?,?,'node' FROM tasks WHERE id=?`,
 			s.Type, s.Value, s.Detail, taskID); err != nil {
 			return err
 		}
