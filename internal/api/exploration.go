@@ -249,8 +249,8 @@ func (b *expBuilder) edge(src, dst, etype string) {
 	b.edges = append(b.edges, expEdge{Source: src, Target: dst, EType: etype})
 }
 
-func sp(s string) *string    { return &s }
-func intPtr(i int) *int      { return &i }
+func sp(s string) *string { return &s }
+func intPtr(i int) *int   { return &i }
 
 type agentLogRow struct {
 	ID      int
@@ -594,7 +594,7 @@ func (a *API) DecisionTree(w http.ResponseWriter, r *http.Request) {
 			pendingTools = nil // 新思考开启，旧工具节点保持当前状态
 		case "tool_call":
 			node := &treeNode{ID: "n-" + strconv.Itoa(l.ID), Type: "tool",
-				Label: "⚙ " + l.Tool + "(" + runesPrefix(argsLabel(l.Args), 80) + ")",
+				Label:  "⚙ " + l.Tool + "(" + runesPrefix(argsLabel(l.Args), 80) + ")",
 				Status: "running", Detail: l.Content, Children: []*treeNode{}}
 			target := parent
 			if currentThought != nil {

@@ -88,12 +88,20 @@ func (r *retestReporter) SaveEvidence(ctx context.Context, typ, content string, 
 }
 
 func (r *retestReporter) SaveAsset(context.Context, string, string, map[string]any) {}
-func (r *retestReporter) SaveFinding(context.Context, tools.Finding) (int64, error) { return 0, nil }
-func (r *retestReporter) UpdateFinding(context.Context, int64, map[string]any) error { return nil }
-func (r *retestReporter) SaveKnowledge(context.Context, string, string) error       { return nil }
+
+// SaveTraffic 复测也走结构化流量录制（重放报文留痕）。
+func (r *retestReporter) SaveTraffic(ctx context.Context, method, rawURL, reqBody string,
+	status int, snippet, sourceTool string) {
+	_, _ = r.db.ExecContext(ctx,
+		"INSERT INTO traffic_logs (project_id, task_id, method, url, request_body, status, response_snippet, source_tool) VALUES (?,?,0,?,?,?,?,?)",
+		r.project, method, rawURL, reqBody, status, tools.Truncate(snippet, 600), sourceTool)
+}
+func (r *retestReporter) SaveFinding(context.Context, tools.Finding) (int64, error)     { return 0, nil }
+func (r *retestReporter) UpdateFinding(context.Context, int64, map[string]any) error    { return nil }
+func (r *retestReporter) SaveKnowledge(context.Context, string, string) error           { return nil }
 func (r *retestReporter) SearchKnowledge(context.Context, string, int) []map[string]any { return nil }
-func (r *retestReporter) Log(context.Context, string, string, string)               {}
-func (r *retestReporter) LLMDesc() string                                            { return "retest" }
+func (r *retestReporter) Log(context.Context, string, string, string)                   {}
+func (r *retestReporter) LLMDesc() string                                               { return "retest" }
 
 // RetestFinding POST /api/findings/{id}/retest — 按原利用链步骤范围内重放，LLM 三选一判定并追加进 detail。
 func (a *API) RetestFinding(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +152,7 @@ func (a *API) RetestFinding(w http.ResponseWriter, r *http.Request) {
 		if len(proj.AllowHosts) > 0 {
 			if err := json.Unmarshal(proj.AllowHosts, &allowHosts); err != nil {
 				allowHosts = nil
-		}
+			}
 		}
 	}
 	var rules []scope.Rule

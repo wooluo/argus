@@ -31,8 +31,20 @@ type pollTask struct {
 		Model   string `json:"model"`
 		Proxy   string `json:"proxy"`
 	} `json:"llm"`
-	Knowledge string `json:"knowledge"` // server 注入的知识库块
-	ApprovalsRequire []string `json:"approvals_require"` // HITL 审批名单（空=无审批）
+	Knowledge        string      `json:"knowledge"`         // server 注入的知识库块
+	ApprovalsRequire []string    `json:"approvals_require"` // HITL 审批名单（空=无审批）
+	Intel            []string    `json:"intel"`             // 项目情报（跨任务持久）
+	Skills           string      `json:"skills"`            // 启用的 Skill 领域知识块
+	MCP              []mcpServer `json:"mcp"`               // 启用的 MCP 服务器（动态注入工具）
+	Agent            struct {
+		Prompt   string `json:"prompt"`    // hunt 角色自定义系统提示词
+		MaxSteps int    `json:"max_steps"` // 步数预算覆盖（0=默认）
+	} `json:"agent"`
+	FOFA struct {
+		Email string `json:"email"`
+		Key   string `json:"key"`
+	} `json:"fofa"`
+	ContinueSummary string `json:"continue_summary"` // 断点续测：上轮成果摘要
 }
 
 // buildBrief 从 Poll 响应组装 pipeline.Brief。
@@ -61,6 +73,13 @@ func (p *pollTask) buildBrief() pipeline.Brief {
 	b.LLM.Proxy = p.LLM.Proxy
 	b.Knowledge = p.Knowledge
 	b.ApprovalsRequire = p.ApprovalsRequire
+	b.Intel = p.Intel
+	b.Skills = p.Skills
+	b.AgentPrompt = p.Agent.Prompt
+	b.AgentMaxSteps = p.Agent.MaxSteps
+	b.FOFAEmail = p.FOFA.Email
+	b.FOFAKey = p.FOFA.Key
+	b.ContinueSummary = p.ContinueSummary
 	return b
 }
 
@@ -70,6 +89,15 @@ func execTask(p *pollTask) *pipeline.Result {
 	brief := p.buildBrief()
 	// HITL 审批门：经 server HTTP 回连（名单命中时写 pending + 轮询人工决定）
 	brief.ApprovalGate = approvalGate{taskID: brief.TaskID, projectID: brief.ProjectID}
+	// 运行中情报：后台轮询 server 攒队列，agent 每步 Drain
+	iq := &intelQueue{}
+	brief.IntelQueue = iq
+	stopIntel := startIntelPoller(brief.TaskID, iq)
+	defer stopIntel()
+	// MCP 动态工具注入（启用的服务器 → 全局 Registry，agent 即刻可用）
+	if n := registerMCPTools(p.MCP); n > 0 {
+		log.Printf("[exec] task=%d MCP 注入 %d 个工具", p.Task.TaskID, n)
+	}
 	var lastFlush time.Time
 	onFlush := func(inc pipeline.Result) {
 		if time.Since(lastFlush) < 5*time.Second {
@@ -81,6 +109,7 @@ func execTask(p *pollTask) *pipeline.Result {
 			"findings": inc.Findings,
 			"assets":   inc.Assets,
 			"logs":     inc.Logs,
+			"traffic":  inc.Traffic,
 		}
 		if code, _, err := call("POST", "/api/nodes/progress", payload); err != nil || code != 200 {
 			log.Printf("progress flush skipped (code=%d err=%v)", code, err)

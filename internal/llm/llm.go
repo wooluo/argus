@@ -123,13 +123,13 @@ type chatRequest struct {
 }
 
 type Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	}
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
 
 type ChatResp struct {
-		Usage *Usage `json:"usage,omitempty"`
+	Usage   *Usage `json:"usage,omitempty"`
 	Choices []struct {
 		Message struct {
 			Role      string     `json:"role"`

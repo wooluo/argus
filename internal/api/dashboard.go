@@ -5,10 +5,10 @@ import (
 	"math"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-	"time"
-	"strconv"
 	"database/sql"
+	"github.com/go-chi/chi/v5"
+	"strconv"
+	"time"
 )
 
 // ============ Dashboard 域（蓝本 api/dashboard.py dashboard_stats） ============
@@ -252,18 +252,17 @@ func (a *API) GetDashboard(w http.ResponseWriter, r *http.Request) {
 		// 蓝本 round((p+c)/1000, 1)
 		TokensK:    math.Round(float64(total.Prompt+total.Completion)/100) / 10,
 		TasksTotal: tasksTotal, TaskStatus: taskStatus,
-		Running:   taskStatus["running"],
-		Completed: taskStatus["completed"],
-		Failed:    taskStatus["failed"],
-		Stopped:   taskStatus["stopped"],
+		Running:     taskStatus["running"],
+		Completed:   taskStatus["completed"],
+		Failed:      taskStatus["failed"],
+		Stopped:     taskStatus["stopped"],
 		Sev:         sevMap,
 		RecentTasks: recent, Days: days,
 		PendingApprovals: pending,
-		Activity:       activity,
-		RecentFindings: findings,
+		Activity:         activity,
+		RecentFindings:   findings,
 	})
 }
-
 
 // SystemLogs GET /api/system/logs?limit=200 — 跨项目审计日志（蓝本 system_logs 路由）。
 func (a *API) SystemLogs(w http.ResponseWriter, r *http.Request) {
@@ -420,7 +419,6 @@ func (a *API) PutApprovalConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	respondJSON(w, 200, map[string]any{"ok": true})
 }
-
 
 func settingStr(db *sql.DB, key string) string {
 	var v sql.NullString

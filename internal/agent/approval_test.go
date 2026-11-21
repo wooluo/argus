@@ -29,9 +29,9 @@ type fakeTool struct {
 	fail bool
 }
 
-func (f fakeTool) Name() string                 { return f.name }
-func (f fakeTool) Description() string          { return "fake" }
-func (f fakeTool) Parameters() map[string]any   { return map[string]any{"type": "object"} }
+func (f fakeTool) Name() string               { return f.name }
+func (f fakeTool) Description() string        { return "fake" }
+func (f fakeTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
 func (f fakeTool) Execute(_ context.Context, _ map[string]any, _ *tools.Context) (string, error) {
 	if f.fail {
 		return "", tools.Errorf("boom")

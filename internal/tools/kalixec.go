@@ -24,7 +24,6 @@ import (
 // cmdBlacklist 命令黑名单（对应 kali_exec._BLACKLIST / run_script._CODE_BLACKLIST）。
 // rm 系不在此表：RE2 无负向前瞻，rm -rf 的放行/拦截由 rmrfBlocked 单独处理。
 var cmdBlacklist = []struct {
-
 	pat *regexp.Regexp
 	why string
 }{

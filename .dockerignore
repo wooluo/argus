@@ -1,0 +1,9 @@
+.git
+argus-server
+argus-node
+argus-server-linux-*
+argus-node-linux-*
+*.md
+docs/
+.github/
+data/

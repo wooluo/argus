@@ -35,7 +35,15 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("%w\nSQL: %.120s", err, stmt)
 		}
 	}
+	// 增量补列（老库升级）：重复执行时报 duplicate column，幂等忽略。
+	for _, stmt := range alters {
+		_, _ = db.Exec(stmt)
+	}
 	return nil
+}
+
+var alters = []string{
+	`ALTER TABLE tasks ADD COLUMN continue_from INTEGER NOT NULL DEFAULT 0`,
 }
 
 var migrations = []string{

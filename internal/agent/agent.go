@@ -6,9 +6,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 	"fmt"
 	"math"
+	"regexp"
 	"sync"
 	"time"
 
@@ -18,7 +18,7 @@ import (
 
 // Options Agent 运行参数。
 type Options struct {
-	BudgetBase int // 动态预算基准（0=不启用上调）
+	BudgetBase    int // 动态预算基准（0=不启用上调）
 	TaskID        int64
 	Stage         string // hunt / recon / mapping / vulnscan / verify / report
 	ContextLimit  int    // 上下文裁剪保留的消息条数（原版 40）
@@ -40,17 +40,17 @@ type Agent struct {
 
 	// 推理防空转（移植自 AutoPentest agent.py）：
 	// recentCalls 近 16 次工具调用签名（同参重复直接拦截）
-	recentCalls map[string]string // 签名 → 上次结果摘要
-	callOrder   []string          // 签名时效（LRU 裁剪）
-	digest     []string           // 工作纪要（上下文压缩后的攻击链记忆）
-	nudges     int                // 过早收工纠正次数（上限 3）
-	failStreak map[string]int     // 同签名（工具+参数）连续失败计数（蓝本 _track_failure）
-	tokPrompt    int64  // LLM token 累计（prompt）
-	tokCompletion int64 // LLM token 累计（completion）
-	tokCalls     int64  // LLM 调用次数
+	recentCalls   map[string]string // 签名 → 上次结果摘要
+	callOrder     []string          // 签名时效（LRU 裁剪）
+	digest        []string          // 工作纪要（上下文压缩后的攻击链记忆）
+	nudges        int               // 过早收工纠正次数（上限 3）
+	failStreak    map[string]int    // 同签名（工具+参数）连续失败计数（蓝本 _track_failure）
+	tokPrompt     int64             // LLM token 累计（prompt）
+	tokCompletion int64             // LLM token 累计（completion）
+	tokCalls      int64             // LLM 调用次数
 	// resHist 响应收敛检测：归一化指纹滑窗 3 次，全同即注入换思路提示
-	resHist  [3]string
-	resHistN int
+	resHist   [3]string
+	resHistN  int
 	convNoted string // 本轮收敛指纹（同轮只提示一次）
 }
 
@@ -314,7 +314,6 @@ func budgetFor(base, assets int) int {
 	}
 	return n
 }
-
 
 // recordTokens 累计 LLM token 用量（蓝本 _record_tokens → tasks.tokens）。
 func (a *Agent) recordTokens(resp *llm.ChatResp) {

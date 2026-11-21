@@ -58,15 +58,48 @@ func (b *Bus) Publish(event string, data any) {
 	}
 }
 
-// ServeSSE: /api/stream — text/event-stream。
+// ServeSSE: /api/stream — text/event-stream（按 ?event= 过滤事件名）。
 func (b *Bus) ServeSSE(w http.ResponseWriter, r *http.Request) {
+	b.serveSSE(w, r, r.URL.Query().Get("event"), nil)
+}
+
+// ServeSSETask: /api/stream/{task_id} — 单任务事件流
+// （data.task_id 或 data.id 等于该任务的事件；蓝本 api/stream.py）。
+func (b *Bus) ServeSSETask(w http.ResponseWriter, r *http.Request, taskID int64) {
+	b.serveSSE(w, r, "", func(evt Event) bool {
+		m, ok := evt.Data.(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, k := range []string{"task_id", "id"} {
+			switch v := m[k].(type) {
+			case int64:
+				if v == taskID {
+					return true
+				}
+			case int:
+				if int64(v) == taskID {
+					return true
+				}
+			case float64:
+				if int64(v) == taskID {
+					return true
+				}
+			}
+		}
+		return false
+	})
+}
+
+// serveSSE SSE 主循环：nameFilter 订阅期过滤（空=全部），evtKeep 逐事件过滤（nil=全放行）。
+func (b *Bus) serveSSE(w http.ResponseWriter, r *http.Request,
+	nameFilter string, evtKeep func(Event) bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	filter := r.URL.Query().Get("event")
-	sub, cancel := b.Subscribe(filter)
+	sub, cancel := b.Subscribe(nameFilter)
 	defer cancel()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -89,6 +122,9 @@ func (b *Bus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, ": ping\n\n")
 			fl.Flush()
 		case evt := <-sub.ch:
+			if evtKeep != nil && !evtKeep(evt) {
+				continue
+			}
 			payload, err := json.Marshal(evt.Data)
 			if err != nil {
 				continue

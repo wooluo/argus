@@ -107,6 +107,7 @@ func pollAndRun() bool {
 		"findings": res.Findings,
 		"assets":   res.Assets,
 		"logs":     res.Logs,
+		"traffic":  res.Traffic,
 	}
 	if res.Report != "" {
 		payload["report"] = res.Report

@@ -93,10 +93,10 @@ func templatesMeta(path string) (map[string]any, error) {
 	}
 	name := strings.TrimSuffix(filepath.Base(path), ".md")
 	return map[string]any{
-		"id":        name,
-		"name":      strings.ReplaceAll(name, "_", " "),
-		"size":      st.Size(),
-		"mtime":     st.ModTime().Format("2006-01-02 15:04"),
+		"id":         name,
+		"name":       strings.ReplaceAll(name, "_", " "),
+		"size":       st.Size(),
+		"mtime":      st.ModTime().Format("2006-01-02 15:04"),
 		"is_default": filepath.Base(path) == "default.md",
 	}, nil
 }

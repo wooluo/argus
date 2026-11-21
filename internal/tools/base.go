@@ -43,6 +43,8 @@ type Reporter interface {
 	UpdateFinding(ctx context.Context, id int64, patch map[string]any) error
 	// SaveEvidence 固化证据（http 流量/命令输出）。
 	SaveEvidence(ctx context.Context, typ, content string, meta map[string]any)
+	// SaveTraffic 结构化流量录制（http_fetch/web_login 自动落 TrafficLog，可回放）。
+	SaveTraffic(ctx context.Context, method, rawURL, reqBody string, status int, snippet, sourceTool string)
 	// SaveKnowledge 沉淀可复用经验（后续任务自动携带）。
 	SaveKnowledge(ctx context.Context, title, content string) error
 	// SearchKnowledge 检索历史经验。

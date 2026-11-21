@@ -22,6 +22,7 @@ func (m *memReporter) snapshot() Result {
 		Findings: append([]Finding(nil), m.res.Findings...),
 		Assets:   append([]Asset(nil), m.res.Assets...),
 		Logs:     append([]LogItem(nil), m.res.Logs...),
+		Traffic:  append([]TrafficItem(nil), m.res.Traffic...),
 	}
 }
 
@@ -50,6 +51,20 @@ func Run(ctx context.Context, b Brief, onFlush func(Result)) *Result {
 		if b.ApprovalGate != nil {
 			tc.Extra["approval_gate"] = b.ApprovalGate
 		}
+	}
+	// 运行中情报队列（节点轮询 server 攒入；agent 每步 Drain 注入高优先级消息）
+	if b.IntelQueue != nil {
+		if tc.Extra == nil {
+			tc.Extra = map[string]any{}
+		}
+		tc.Extra["intel_queue"] = b.IntelQueue
+	}
+	// FOFA 凭据下发（覆盖节点环境变量；掩码值在工具侧回落 env）
+	if b.FOFAEmail != "" || b.FOFAKey != "" {
+		if tc.Extra == nil {
+			tc.Extra = map[string]any{}
+		}
+		tc.Extra["fofa_email"], tc.Extra["fofa_key"] = b.FOFAEmail, b.FOFAKey
 	}
 
 	client := llm.NewClient(llm.DefaultProvider(b.LLM))

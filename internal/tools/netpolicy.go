@@ -49,7 +49,7 @@ func TargetProxy() string {
 // ProxyTransport 按用途构造 http.Transport（TLS 不校验，与工具侧惯例一致）。
 func ProxyTransport(proxyURL string) *http.Transport {
 	t := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConnsPerHost: 8,
 	}
 	if proxyURL != "" {
@@ -62,7 +62,7 @@ func ProxyTransport(proxyURL string) *http.Transport {
 
 // OutClient 平台出站 HTTP 客户端（对内网自动直连、公网走出站代理）。
 func OutClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: ProxyTransport(OutProxyFor("")) }
+	return &http.Client{Timeout: timeout, Transport: ProxyTransport(OutProxyFor(""))}
 }
 
 func isPrivateHost(host string) bool {

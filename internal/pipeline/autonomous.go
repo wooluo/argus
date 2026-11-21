@@ -2,9 +2,9 @@
 package pipeline
 
 import (
-	"math"
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/wooluo/argus/internal/agent"
@@ -18,12 +18,20 @@ func runAutonomous(ctx context.Context, b Brief, tc *tools.Context, rep *memRepo
 	// 自适应步数预算（移植自 AutoPentent：对数缩放，边际收益递减）：
 	// base × max(1, log2(1+资产数)/6)，下限 60 上限 300
 	base := 120
+	if b.AgentMaxSteps > 0 {
+		base = b.AgentMaxSteps // 自定义 Agent（hunt 角色）覆盖基准预算
+	}
 	maxSteps := adaptiveSteps(base, rep.assetCount())
 	rep.Log(ctx, "system", "hunt", fmt.Sprintf(
 		"任务启动 · 授权范围: %s · 模式: 自主（步数预算 %d）· 模型: %s",
 		tc.Scope.Describe(), maxSteps, rep.LLMDesc()))
 
 	system, brief := autonomousBrief(b)
+	// 自定义 Agent prompt 覆盖（安全红线 SAFETY_RULES 不可被覆盖）
+	if strings.TrimSpace(b.AgentPrompt) != "" {
+		system = strings.TrimSpace(b.AgentPrompt) + "\n\n" + SAFETY_RULES
+		rep.Log(ctx, "system", "hunt", "已加载自定义 Agent 系统提示词（hunt）")
+	}
 	a := agent.New(client, agent.Options{
 		TaskID: b.TaskID, Stage: "hunt", ContextLimit: 40,
 		MaxSteps: maxSteps, RequireReport: true,
@@ -76,11 +84,39 @@ func autonomousBrief(b Brief) (system, brief string) {
 		rulesBlock = "## 项目说明 / 测试规范（委托方要求，必须遵守并优先应用）\n" + d + "\n"
 	}
 
+	// 项目情报块（跨任务持久：凭据/入口/提示，蓝本 ProjectIntel）
+	intelBlock := ""
+	if len(b.Intel) > 0 {
+		var lines []string
+		for i, s := range b.Intel {
+			s = strings.TrimSpace(s)
+			if s == "" || len(s) > 600 {
+				s = s[:600]
+			}
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, s))
+		}
+		intelBlock = "## 项目情报（已知信息，第一步优先验证使用，勿浪费步数重复侦察）\n" +
+			strings.Join(lines, "\n") + "\n"
+	}
+
+	// Skill 领域知识块（启用的 skills，server 下发）
+	skillsBlock := ""
+	if strings.TrimSpace(b.Skills) != "" {
+		skillsBlock = b.Skills
+	}
+
+	// 断点续测块（continue_from 指定任务的历史成果，蓝本 continue_from）
+	continueBlock := ""
+	if strings.TrimSpace(b.ContinueSummary) != "" {
+		continueBlock = "## 断点续测：上一轮任务已完成的成果（勿重复，直接从缺口继续）\n" +
+			b.ContinueSummary + "\n"
+	}
+
 	brief = `# 渗透测试任务书
 
 ## 目标
 对以下授权范围完成系统性的渗透测试，找到真实存在的问题并给出专业报告。
-` + rulesBlock + knowledgeBlock + `
+` + rulesBlock + intelBlock + continueBlock + knowledgeBlock + skillsBlock + `
 ## 环境情报（供参考，不是步骤指令）
 ` + strings.Join(envLines, "\n") + `
 - 会话工具：web_login 可登录站点（自动处理表单/CSRF），http_fetch 带会话访问任意页面——有凭据时优先登录并系统测试认证后的每个功能模块

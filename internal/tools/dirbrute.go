@@ -43,7 +43,7 @@ func (DirBruteTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 		}
 	}
 	cl := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout:   10 * time.Second,
 		Transport: ProxyTransport(TargetProxy()), // 测试流量代理（WAF 规避，显式即全量）
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // 不跟随

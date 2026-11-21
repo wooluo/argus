@@ -4,13 +4,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/wooluo/argus/internal/intel"
 	"github.com/wooluo/argus/internal/store"
-	"fmt"
 )
 
 // ================= Tasks =================
@@ -97,7 +99,7 @@ func (a *API) StartTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Mode         string `json:"mode"`         // autonomous/staged
+		Mode         string `json:"mode"`          // autonomous/staged
 		ContinueFrom int64  `json:"continue_from"` // 断点续测：携带指定任务的成果
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -113,8 +115,8 @@ func (a *API) StartTask(w http.ResponseWriter, r *http.Request) {
 	if req.ContinueFrom > 0 {
 		contNote = fmt.Sprintf("[continue_from=%d]", req.ContinueFrom)
 	}
-	res, err := a.DB.Exec(`INSERT INTO tasks(project_id,mode,status,current_stage,message) VALUES(?,?,?,?,?)`,
-		pid, req.Mode, "pending", "", contNote)
+	res, err := a.DB.Exec(`INSERT INTO tasks(project_id,mode,status,current_stage,message,continue_from) VALUES(?,?,?,?,?,?)`,
+		pid, req.Mode, "pending", "", contNote, req.ContinueFrom)
 	if err != nil {
 		respondErr(w, 500, err.Error())
 		return
@@ -181,6 +183,96 @@ func (a *API) StopTask(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Bus.Publish("task_stopped", map[string]any{"id": id})
 	respondJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// ================= 运行中情报 / 项目情报（蓝本 api/tasks.py intel 域） =================
+
+// SubmitIntel POST /api/tasks/{id}/intel — 向运行中任务实时注入情报。
+// Go 版链路：管理面 Push → 节点每 5s 轮询 /api/nodes/intel 拉走 → agent 下一步注入。
+func (a *API) SubmitIntel(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		respondErr(w, 422, err.Error())
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		respondErr(w, 400, "情报内容不能为空")
+		return
+	}
+	var status string
+	if err := a.DB.QueryRow(`SELECT status FROM tasks WHERE id=?`, id).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondErr(w, 404, "任务不存在")
+			return
+		}
+		respondErr(w, 500, err.Error())
+		return
+	}
+	if status != "running" && status != "pending" && status != "assigned" {
+		respondErr(w, 400, "任务不在运行中，无法注入情报")
+		return
+	}
+	intel.Push(id, strings.TrimSpace(req.Content))
+	respondJSON(w, 200, map[string]any{"ok": true, "queued": truncate(req.Content, 100)})
+}
+
+// GetProjectIntel GET /api/projects/{id}/intel — 项目情报库（跨任务持久）。
+func (a *API) GetProjectIntel(w http.ResponseWriter, r *http.Request) {
+	pid, err := pathID(r)
+	if err != nil {
+		respondErr(w, 422, err.Error())
+		return
+	}
+	rows, err := a.DB.Query(
+		`SELECT id,content,source,created_at FROM project_intel WHERE project_id=? ORDER BY id DESC LIMIT 50`, pid)
+	if err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var content, source, createdAt string
+		if rows.Scan(&id, &content, &source, &createdAt) == nil {
+			out = append(out, map[string]any{
+				"id": id, "content": content, "source": source, "created_at": createdAt})
+		}
+	}
+	respondJSON(w, 200, out)
+}
+
+// AddProjectIntel POST /api/projects/{id}/intel — 手动添加项目情报（下个任务生效）。
+func (a *API) AddProjectIntel(w http.ResponseWriter, r *http.Request) {
+	pid, err := pathID(r)
+	if err != nil {
+		respondErr(w, 422, err.Error())
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		respondErr(w, 400, "情报内容不能为空")
+		return
+	}
+	if _, err := a.DB.Exec(
+		`INSERT INTO project_intel(project_id,content,source) VALUES(?,?,'manual')`,
+		pid, strings.TrimSpace(req.Content)); err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	respondJSON(w, 200, map[string]any{"ok": true})
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // ================= Agent Logs =================

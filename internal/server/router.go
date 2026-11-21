@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -31,8 +32,28 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 	r.Group(func(apig chi.Router) {
 		apig.Use(am.Handler)
 
-		// SSE 事件流
+		// SSE 事件流（全局 + 单任务）
 		apig.Get("/api/stream", bus.ServeSSE)
+		apig.Get("/api/stream/{task_id}", func(w http.ResponseWriter, r *http.Request) {
+			id, err := strconv.ParseInt(chi.URLParam(r, "task_id"), 10, 64)
+			if err != nil || id <= 0 {
+				http.Error(w, `{"detail":"invalid task_id"}`, 422)
+				return
+			}
+			bus.ServeSSETask(w, r, id)
+		})
+
+		// withPID 项目子路由 → 全局列表 handler 的 project_id 查询参数桥接
+		withPID := func(h http.HandlerFunc) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query()
+				if q.Get("project_id") == "" {
+					q.Set("project_id", chi.URLParam(r, "id"))
+					r.URL.RawQuery = q.Encode()
+				}
+				h(w, r)
+			}
+		}
 
 		// Projects
 		apig.Route("/api/projects", func(pr chi.Router) {
@@ -44,6 +65,16 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 				prr.Delete("/", a.DeleteProject)
 				prr.Post("/tasks", a.StartTask)
 				prr.Post("/findings", a.CreateFinding)
+				// 项目维度子列表（蓝本 /projects/{id}/tasks|assets|findings|traffic）
+				prr.Get("/tasks", withPID(a.ListTasks))
+				prr.Get("/assets", withPID(a.ListAssets))
+				prr.Get("/findings", withPID(a.ListFindings))
+				prr.Get("/traffic", withPID(a.ListTraffic))
+				// 项目情报库（跨任务持久）
+				prr.Get("/intel", a.GetProjectIntel)
+				prr.Post("/intel", a.AddProjectIntel)
+				// 资产覆盖图（蓝本 asset_graph）
+				prr.Get("/graph", a.GetGraph)
 				// Reports（报告域）
 				prr.Get("/report", a.GetProjectReport)
 				prr.Get("/report/export", a.ExportReport)
@@ -58,17 +89,25 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			tr.Route("/{id}", func(trr chi.Router) {
 				trr.Get("/", a.GetTask)
 				trr.Post("/stop", a.StopTask)
+				trr.Post("/intel", a.SubmitIntel) // 运行中情报注入
 				trr.Get("/tree", a.DecisionTree)
 				trr.Get("/exploration", a.ExplorationGraph)
 			})
 		})
 
-		// Assets / Findings / Logs
+		// Assets / Findings / Logs / Traffic
 		apig.Get("/api/assets", a.ListAssets)
 		apig.Get("/api/findings", a.ListFindings)
 		apig.Get("/api/reports", a.ListReports)
+		apig.Get("/api/traffic", a.ListTraffic)
 		apig.Patch("/api/findings/{id}", a.UpdateFindingStatus)
 		apig.Post("/api/findings/{id}/retest", a.RetestFinding)
+		apig.Post("/api/findings/read-all", a.MarkAllFindingsRead)
+		apig.Post("/api/findings/{id}/read", a.MarkFindingRead)
+		apig.Get("/api/findings/{id}/evidence", a.FindingEvidence)
+		apig.Get("/api/findings/{id}/steps", a.FindingSteps)
+		apig.Delete("/api/findings/{id}", a.DeleteFinding)
+		apig.Post("/api/traffic/{id}/replay", a.ReplayTraffic)
 		apig.Get("/api/knowledge", a.ListKnowledge)
 		apig.Post("/api/knowledge", a.CreateKnowledge)
 		apig.Get("/api/knowledge/github-config", a.GetGithubConfig)
@@ -92,6 +131,8 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/settings/llm/models", a.LLMModels)
 		apig.Get("/api/settings/llm/preset-keys", a.GetPresetKeys)
 		apig.Put("/api/settings/llm/preset-keys", a.PutPresetKey)
+		apig.Get("/api/settings/fofa", a.GetFofaConfig)
+		apig.Put("/api/settings/fofa", a.PutFofaConfig)
 		apig.Get("/api/tools", a.ToolsStatus)
 
 		// Extension 域（蓝本 api/extension.py）
@@ -118,6 +159,8 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 
 		// Dashboard 域（蓝本 api/dashboard.py）
 		apig.Get("/api/dashboard/stats", a.GetDashboard)
+		apig.Get("/api/dashboard/sources", a.GetSources)
+		apig.Put("/api/dashboard/sources", a.PutSources)
 		apig.Get("/api/system/logs", a.SystemLogs)
 
 		// Approvals 域（蓝本 api/approvals.py：高危工具调用审批）
@@ -177,6 +220,8 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			// HITL 审批门：节点写 pending + 轮询决定（管理面 /api/approvals 决策）
 			ng.Post("/approvals", nodeAPI.CreateApproval)
 			ng.Get("/approvals/{id}", nodeAPI.GetApproval)
+			// 运行中情报：节点轮询拉取操作员提交的情报
+			ng.Get("/intel", nodeAPI.NodeIntel)
 		})
 	})
 

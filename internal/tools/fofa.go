@@ -48,10 +48,20 @@ func (FofaTool) Execute(ctx context.Context, args map[string]any, tc *Context) (
 	} else if size > 100 {
 		size = 100
 	}
+	// 配置来源：server 经 Poll 下发（Extra["fofa_email"]/["fofa_key"]，设置页可配）
+	// 优先于环境变量；掩码值（****）视为未配置回落 env。
 	email := strings.TrimSpace(os.Getenv("ARGUS_FOFA_EMAIL"))
 	key := strings.TrimSpace(os.Getenv("ARGUS_FOFA_KEY"))
+	if tc != nil && tc.Extra != nil {
+		if v, _ := tc.Extra["fofa_email"].(string); strings.TrimSpace(v) != "" && !strings.Contains(v, "*") {
+			email = strings.TrimSpace(v)
+		}
+		if v, _ := tc.Extra["fofa_key"].(string); strings.TrimSpace(v) != "" && !strings.Contains(v, "*") {
+			key = strings.TrimSpace(v)
+		}
+	}
 	if email == "" || key == "" || strings.Trim(key, "*") == "" {
-		return "", Errorf("FOFA 未配置：需设置 ARGUS_FOFA_EMAIL 与 ARGUS_FOFA_KEY（fofa.info 个人中心获取）")
+		return "", Errorf("FOFA 未配置：在设置页配置 FOFA Email/Key，或设置 ARGUS_FOFA_EMAIL 与 ARGUS_FOFA_KEY 环境变量")
 	}
 
 	qb := base64.StdEncoding.EncodeToString([]byte(query))
@@ -67,9 +77,9 @@ func (FofaTool) Execute(ctx context.Context, args map[string]any, tc *Context) (
 	}
 	defer resp.Body.Close()
 	var data struct {
-		Error   bool     `json:"error"`
-		Errmsg  string   `json:"errmsg"`
-		Size    int      `json:"size"`
+		Error   bool       `json:"error"`
+		Errmsg  string     `json:"errmsg"`
+		Size    int        `json:"size"`
 		Results [][]string `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {

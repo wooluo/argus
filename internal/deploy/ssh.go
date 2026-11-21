@@ -19,22 +19,22 @@ import (
 
 // SSHConfig SSH 连接参数（UI 表单提交）。
 type SSHConfig struct {
-	Host           string `json:"host"`
-	Port           int    `json:"port"`
-	Username       string `json:"username"`
-	AuthType       string `json:"auth_type"` // password | key
-	Password       string `json:"password,omitempty"`
-	PrivateKey     string `json:"private_key,omitempty"` // PEM 格式（可选）
-	NodeName       string `json:"node_name"`
-	ServerURL      string `json:"server_url"`  // 节点回连地址
-	NodeToken      string `json:"node_token"`  // 节点注册 token
-	BinaryPath     string `json:"binary_path"` // 本机 argus-node 二进制路径
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	AuthType   string `json:"auth_type"` // password | key
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"private_key,omitempty"` // PEM 格式（可选）
+	NodeName   string `json:"node_name"`
+	ServerURL  string `json:"server_url"`  // 节点回连地址
+	NodeToken  string `json:"node_token"`  // 节点注册 token
+	BinaryPath string `json:"binary_path"` // 本机 argus-node 二进制路径
 }
 
 // Result 部署结果。
 type Result struct {
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
+	OK      bool     `json:"ok"`
+	Message string   `json:"message"`
 	Steps   []string `json:"steps,omitempty"`
 }
 
@@ -232,7 +232,6 @@ func min(a, b int) int {
 	return b
 }
 
-
 // pickBinary 按远端架构找本机对应的 argus-node 二进制。
 // 优先精确匹配 argus-node-linux-{arch}，回退同目录通用名（仅同架构时）。
 func pickBinary(remoteArch string) string {
@@ -241,8 +240,8 @@ func pickBinary(remoteArch string) string {
 		return ""
 	}
 	candidates := []string{
-		fmt.Sprintf("argus-node-linux-%s", goArch),              // 交叉编译产物（优先）
-		fmt.Sprintf("argus-server-linux-%s", goArch),              // 兼容（极端情况）
+		fmt.Sprintf("argus-node-linux-%s", goArch),   // 交叉编译产物（优先）
+		fmt.Sprintf("argus-server-linux-%s", goArch), // 兼容（极端情况）
 	}
 	// 仅当 server 本身就是 Linux + 同架构时，通用名也可用
 	if runtime.GOOS == "linux" && runtime.GOARCH == goArch {

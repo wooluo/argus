@@ -86,7 +86,7 @@ func (a *API) GetProjectReport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// exportReport GET /api/projects/{id}/report/export?format=md|html|txt
+// exportReport GET /api/projects/{id}/report/export?format=md|html|txt|docx
 func (a *API) ExportReport(w http.ResponseWriter, r *http.Request) {
 	id, _ := pathID(r)
 	format := r.URL.Query().Get("format")
@@ -115,6 +115,11 @@ func (a *API) ExportReport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Content-Disposition", "attachment; filename="+name+".txt")
 		_, _ = w.Write([]byte(stripMarkdown(markdown)))
+	case "docx":
+		w.Header().Set("Content-Type",
+			"application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+		w.Header().Set("Content-Disposition", "attachment; filename="+name+".docx")
+		_, _ = w.Write(renderDocx(markdown))
 	default: // md
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Content-Disposition", "attachment; filename="+name+".md")

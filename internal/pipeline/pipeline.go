@@ -6,6 +6,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -24,13 +25,27 @@ type Brief struct {
 	ProjectID   int64        `json:"project_id"`
 	ProjectName string       `json:"project_name"`
 	Description string       `json:"description"`
-	Knowledge   string       `json:"knowledge"`   // server 注入的知识库块（跨任务经验）
+	Knowledge   string       `json:"knowledge"` // server 注入的知识库块（跨任务经验）
 	Scope       []scope.Rule `json:"scope"`
 	AllowHosts  []string     `json:"allow_hosts"`
 	LLM         llm.Config   `json:"llm"`
 	// HITL 审批门：名单由 server Poll 下发，门实现由节点注入（HTTP 回连）。
 	ApprovalsRequire []string           `json:"approvals_require"`
 	ApprovalGate     agent.ApprovalGate `json:"-"`
+	// 运行中情报注入：节点轮询 server 攒入队列，agent 循环每步 Drain（蓝本 intel_queue）。
+	IntelQueue agent.IntelQueue `json:"-"`
+	// 项目情报（跨任务持久，任务书携带）。
+	Intel []string `json:"intel"`
+	// Skill 领域知识块（启用的 skills 拼接，server 下发）。
+	Skills string `json:"skills"`
+	// 自定义 Agent（hunt 角色覆盖：prompt 非空时替换内置系统提示词；步数>0 时覆盖预算）。
+	AgentPrompt   string `json:"agent_prompt"`
+	AgentMaxSteps int    `json:"agent_max_steps"`
+	// FOFA 凭据（server 设置页下发，覆盖节点环境变量）。
+	FOFAEmail string `json:"fofa_email"`
+	FOFAKey   string `json:"fofa_key"`
+	// 断点续测：continue_from 指定任务的历史成果摘要（server 生成下发）。
+	ContinueSummary string `json:"continue_summary"`
 }
 
 // Finding / Asset / LogItem 与 server ReportResult 请求体字段一一对应。
@@ -59,23 +74,35 @@ type LogItem struct {
 
 // Result 任务执行产物（node → server）。
 type Result struct {
-	Status   string    `json:"status"` // done | failed
-	Message  string    `json:"message"`
-	Findings []Finding `json:"findings"`
-	Assets   []Asset   `json:"assets"`
-	Logs     []LogItem `json:"logs"`
-	Report   string    `json:"report"`
+	Status   string           `json:"status"` // done | failed
+	Message  string           `json:"message"`
+	Findings []Finding        `json:"findings"`
+	Assets   []Asset          `json:"assets"`
+	Logs     []LogItem        `json:"logs"`
+	Traffic  []TrafficItem    `json:"traffic,omitempty"`
+	Report   string           `json:"report"`
 	Tokens   map[string]int64 `json:"tokens,omitempty"`
+}
+
+// TrafficItem 结构化流量（http_fetch/web_login 自动录制，server 落 traffic_logs）。
+type TrafficItem struct {
+	Method          string `json:"method"`
+	URL             string `json:"url"`
+	RequestBody     string `json:"request_body"`
+	Status          int    `json:"status"`
+	ResponseSnippet string `json:"response_snippet"`
+	SourceTool      string `json:"source_tool"`
 }
 
 // memReporter 缓冲式 Reporter：工具产出先攒在内存（阶段间 _data_summary 直接
 // 读缓冲，替代原版查库），flush 回调把新增条目增量推给 server（长任务可见进度）。
 type memReporter struct {
-	mu      sync.Mutex
-	res     *Result
-	sentF   int
-	sentA   int
-	sentL   int
+	mu        sync.Mutex
+	res       *Result
+	sentF     int
+	sentA     int
+	sentL     int
+	sentT     int
 	onFlush   func(Brief, Result) // 可选：增量上报（只带新增条目）
 	brief     Brief
 	knowledge []knowledgeEntry // 会话内知识（SaveKnowledge 入此，供 SearchKnowledge）
@@ -90,11 +117,14 @@ func (m *memReporter) flushLocked() {
 		Findings: m.res.Findings[m.sentF:],
 		Assets:   m.res.Assets[m.sentA:],
 		Logs:     m.res.Logs[m.sentL:],
+		Traffic:  m.res.Traffic[m.sentT:],
 	}
-	if len(inc.Findings) == 0 && len(inc.Assets) == 0 && len(inc.Logs) == 0 {
+	if len(inc.Findings) == 0 && len(inc.Assets) == 0 && len(inc.Logs) == 0 &&
+		len(inc.Traffic) == 0 {
 		return
 	}
-	m.sentF, m.sentA, m.sentL = len(m.res.Findings), len(m.res.Assets), len(m.res.Logs)
+	m.sentF, m.sentA, m.sentL, m.sentT =
+		len(m.res.Findings), len(m.res.Assets), len(m.res.Logs), len(m.res.Traffic)
 	go m.onFlush(m.brief, inc)
 }
 
@@ -163,6 +193,19 @@ func (m *memReporter) SaveEvidence(_ context.Context, typ, content string, meta 
 	m.flushLocked()
 }
 
+// SaveTraffic 结构化流量录制（蓝本 record_traffic 落 TrafficLog，节点回传 server）。
+func (m *memReporter) SaveTraffic(_ context.Context, method, rawURL, reqBody string,
+	status int, snippet, sourceTool string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.res.Traffic = append(m.res.Traffic, TrafficItem{
+		Method: method, URL: rawURL, RequestBody: tools.Truncate(reqBody, 4000),
+		Status: status, ResponseSnippet: tools.Truncate(snippet, 4000),
+		SourceTool: sourceTool,
+	})
+	m.flushLocked()
+}
+
 // SaveKnowledge 沉淀经验：经增量日志通道回传（server 侧可入库 knowledge）。
 func (m *memReporter) SaveKnowledge(_ context.Context, title, content string) error {
 	m.mu.Lock()
@@ -176,8 +219,8 @@ func (m *memReporter) SaveKnowledge(_ context.Context, title, content string) er
 	return nil
 }
 
-// SearchKnowledge 会话内知识检索（本任务沉淀的条目，BM25 简化打分：
-// 词频×逆文档频率；跨任务知识由 server 在任务书注入 Brief，不走此路径）。
+// SearchKnowledge 会话内知识检索（本任务沉淀的条目，标准 BM25：
+// k1=1.5 / b=0.75，文档长度归一 + 饱和词频；跨任务知识由 server 在任务书注入 Brief）。
 func (m *memReporter) SearchKnowledge(_ context.Context, query string, limit int) []map[string]any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -187,25 +230,48 @@ func (m *memReporter) SearchKnowledge(_ context.Context, query string, limit int
 	if limit <= 0 {
 		limit = 5
 	}
-	// 分词：英文词 + 中文单字 bigram（与原版 BM25 一致）
+	const k1, b = 1.5, 0.75
 	tokens := tokenize(query)
-	type scored struct {
-		s   float64
-		kv  knowledgeEntry
-	}
-	var out []scored
-	for _, kv := range m.knowledge {
+	N := len(m.knowledge)
+
+	// 预计算：每篇文档的词频与长度
+	tfs := make([]map[string]int, N)
+	dls := make([]int, N)
+	totalLen := 0
+	df := map[string]int{}
+	for i, kv := range m.knowledge {
 		docT := tokenize(kv.title + " " + kv.content)
+		dls[i] = len(docT)
+		totalLen += len(docT)
 		tf := map[string]int{}
+		seen := map[string]bool{}
 		for _, t := range docT {
 			tf[t]++
+			if !seen[t] {
+				seen[t] = true
+				df[t]++
+			}
 		}
+		tfs[i] = tf
+	}
+	avgdl := float64(totalLen) / float64(N)
+
+	type scored struct {
+		s  float64
+		kv knowledgeEntry
+	}
+	var out []scored
+	for i, kv := range m.knowledge {
 		score := 0.0
 		for _, q := range tokens {
-			if c, ok := tf[q]; ok && c > 0 {
-				idf := 1.0 + float64(len(m.knowledge))/float64(c+1)
-				score += idf * float64(c)
+			c := tfs[i][q]
+			if c == 0 {
+				continue
 			}
+			// BM25 idf: ln(1 + (N - df + 0.5) / (df + 0.5))
+			idf := math.Log(1 + (float64(N)-float64(df[q])+0.5)/(float64(df[q])+0.5))
+			norm := 1 - b + b*float64(dls[i])/avgdl
+			score += idf * float64(c) * (k1 + 1) / (float64(c) + k1*norm)
 		}
 		if score > 0 {
 			out = append(out, scored{score, kv})
