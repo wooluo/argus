@@ -29,6 +29,7 @@ type NodeAPI struct {
 	DB       *sql.DB
 	Bus      eventsBus
 	NodeAuth *auth.NodeAuth
+	Admin    *auth.Middleware // 管理鉴权（SSH 部署时下发的注册凭证 = 当前管理 token）
 }
 
 // eventsBus: server 包内事件发布接口（events.Bus 实现）。
@@ -734,7 +735,13 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 		req.ServerURL = "http://" + localIP() + ":7887"
 	}
 	if req.NodeToken == "" {
+		// 注册端点要求管理 token（防开放注册）——部署下发的凭证必须与之匹配：
+		// 优先专用部署 token（settings.node_deploy_token），否则直接用当前管理
+		// token；本地模式（无 token）时注册放行，占位值即可。
 		req.NodeToken = store.GetSetting(n.DB, "node_deploy_token")
+		if req.NodeToken == "" && n.Admin != nil {
+			req.NodeToken = n.Admin.Token()
+		}
 		if req.NodeToken == "" {
 			req.NodeToken = "argus-node-auto"
 		}

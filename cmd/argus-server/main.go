@@ -33,7 +33,7 @@ func main() {
 
 	// v0: Runner=nil，任务由 argus-node 领取执行（StartTask 检查 nil）
 	a := &api.API{DB: db, Bus: bus, Auth: am}
-	nodeAPI := &server.NodeAPI{DB: db, Bus: bus, NodeAuth: na}
+	nodeAPI := &server.NodeAPI{DB: db, Bus: bus, NodeAuth: na, Admin: am}
 	h := server.NewRouter(a, bus, am, na, nodeAPI, cfg.StaticDir)
 
 	log.Printf("argus-server listening on %s (data=%s, auth=%v)",

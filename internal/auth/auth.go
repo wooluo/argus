@@ -24,6 +24,14 @@ func (m *Middleware) SetToken(t string) {
 	m.mu.Unlock()
 }
 
+// Token 当前管理 token（节点部署时下发给 argus-node 做注册凭证；
+// 空串 = 本地模式，注册端点放行，节点任意 token 均可）。
+func (m *Middleware) Token() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.token
+}
+
 func (m *Middleware) Enabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
