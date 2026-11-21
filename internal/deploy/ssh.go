@@ -205,6 +205,9 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		}
 	}
 	runStep := func(name, cmd string) error {
+		// 步骤间隔：x/crypto 同连接快速开会话会间歇丢失输出（另一提交实测
+		// 30 次约 4 次）——降频规避
+		time.Sleep(250 * time.Millisecond)
 		if err := runStepRaw(name, cmd); err != nil {
 			time.Sleep(800 * time.Millisecond) // 幽灵间歇 → 重试一次
 			if err2 := runStepRaw(name+"（重试）", cmd); err2 != nil {
@@ -262,23 +265,34 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		sudo = "sudo "
 	}
 
-	// 5.2 安装二进制：目录降级尝试（/usr/local/bin 挂载异常时换
-	// /opt/argus、/root），每目录内 mkdir / cp / chmod 独立标记。
+	// 5.2 安装二进制：目录降级 + **效果验证**（cp 的 OK 标记会被幽灵吞——
+	// mkdir 全成功说明目录可写，cp"失败"极可能是误判；以目标文件字节数
+	// 等于本地下节数为准，wc 也被吞时回退标记判定）。
+	verifyBin := func(path string) bool {
+		ns := strings.Fields(probeOne("wc -c < " + path))
+		if len(ns) == 0 {
+			return false // wc 也被吞 → 无法确认
+		}
+		v, err := strconv.ParseInt(ns[0], 10, 64)
+		return err == nil && v == localSize
+	}
 	binPath := ""
 	for _, dir := range []string{"/usr/local/bin", "/opt/argus", "/root"} {
-		if err := runStep("mkdir "+dir, sudo+"mkdir -p "+dir); err != nil {
-			continue
+		_ = runStep("mkdir "+dir, sudo+"mkdir -p "+dir)
+		cpErr := runStep("cp → "+dir,
+			sudo+"cp /tmp/argus-node "+dir+"/argus-node && chmod 755 "+dir+"/argus-node")
+		target := dir + "/argus-node"
+		if cpErr == nil || verifyBin(target) { // 标记成功 或 效果验证成功
+			if cpErr != nil {
+				step("cp 标记被吞但字节数验证通过: " + target)
+			}
+			binPath = target
+			break
 		}
-		if err := runStep("cp → "+dir,
-			sudo+"cp /tmp/argus-node "+dir+"/argus-node && chmod 755 "+dir+"/argus-node"); err != nil {
-			continue
-		}
-		binPath = dir + "/argus-node"
-		break
 	}
 	if binPath == "" {
-		return fail("二进制安装失败（/usr/local/bin、/opt/argus、/root 均不可写？" +
-			"——远端执行 df -h 与 ls -ld /usr/local/bin 自查")
+		return fail("二进制安装失败（三个目录 cp 均无法确认，标记与字节数验证都未通过）——" +
+			"远端执行 df -h 与 ls -l /tmp/argus-node 自查后重试")
 	}
 	step("二进制已安装: " + binPath)
 
