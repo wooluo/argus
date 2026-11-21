@@ -187,8 +187,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/nodes", a.ListNodes)
 		apig.Put("/api/nodes", a.PutNodes)
 		apig.Post("/api/nodes/test", a.TestNode)
-		// 执行节点管理（编辑标注 / 删除残留行）
-		apig.Put("/api/nodes/exec/{id}", nodeAPI.UpdateExecNode)
+		// 执行节点管理（删除残留行；编辑=前端带出信息重新走部署弹窗）
 		apig.Delete("/api/nodes/exec/{id}", nodeAPI.DeleteExecNode)
 
 		// ScopeSentry 域（蓝本 api/scopesentry.py）

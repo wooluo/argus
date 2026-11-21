@@ -103,33 +103,6 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 // UpdateExecNode: PUT /api/nodes/exec/{id} — 编辑执行节点（名称/地址标注）。
 // 注意：改名后节点自身携带旧名，重新注册会按旧名 UPSERT 出新行——重命名
 // 仅用于显示标注场景。
-func (n *NodeAPI) UpdateExecNode(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil || id <= 0 {
-		jerr(w, 422, "invalid id")
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-		Host string `json:"host"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
-		jerr(w, 422, "name 必填")
-		return
-	}
-	res, err := n.DB.Exec(`UPDATE nodes SET name=?, host=? WHERE id=?`,
-		strings.TrimSpace(req.Name), strings.TrimSpace(req.Host), id)
-	if err != nil {
-		jerr(w, 500, err.Error())
-		return
-	}
-	if rowsAffected(res) == 0 {
-		jerr(w, 404, "节点不存在")
-		return
-	}
-	jout(w, 200, map[string]any{"ok": true})
-}
-
 // DeleteExecNode: DELETE /api/nodes/exec/{id} — 删除执行节点
 //（deploying/deploy_failed 残留行清理、下线节点移除；凭证立即失效）。
 func (n *NodeAPI) DeleteExecNode(w http.ResponseWriter, r *http.Request) {
