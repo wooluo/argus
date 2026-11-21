@@ -36,8 +36,9 @@ func (q *intelQueue) Drain() []string {
 	return out
 }
 
-// startIntelPoller 启动情报轮询（任务结束即停）；返回停止函数。
-func startIntelPoller(taskID int64, q *intelQueue) (stop func()) {
+// startIntelPoller 启动情报轮询（任务结束即停）；onStopped 在 server 标记
+// 任务停止时回调（用于取消执行 context——5s 内真正中断）。
+func startIntelPoller(taskID int64, q *intelQueue, onStopped func()) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		t := time.NewTicker(5 * time.Second)
@@ -52,12 +53,23 @@ func startIntelPoller(taskID int64, q *intelQueue) (stop func()) {
 				if err != nil || code != 200 {
 					continue // 瞬时网络错误不致命
 				}
-				var items []string
-				if json.Unmarshal(body, &items) == nil {
-					for _, s := range items {
-						log.Printf("[intel] 收到操作员情报: %.80s", s)
+				var resp struct {
+					Intel   []string `json:"intel"`
+					Stopped bool     `json:"stopped"`
+				}
+				if json.Unmarshal(body, &resp) != nil {
+					continue
+				}
+				for _, s := range resp.Intel {
+					log.Printf("[intel] 收到操作员情报: %.80s", s)
+				}
+				q.push(resp.Intel)
+				if resp.Stopped {
+					log.Printf("[intel] server 已标记任务停止 → 中断执行")
+					if onStopped != nil {
+						onStopped()
 					}
-					q.push(items)
+					return
 				}
 			}
 		}

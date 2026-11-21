@@ -440,7 +440,13 @@ func (n *NodeAPI) NodeIntel(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 422, "task_id required")
 		return
 	}
-	jout(w, 200, intel.Drain(taskID))
+	// 响应带任务停止标志——节点 5s 轮询发现即中断执行（真正的停止）
+	stopped := false
+	var st string
+	if n.DB.QueryRow(`SELECT status FROM tasks WHERE id=?`, taskID).Scan(&st) == nil {
+		stopped = st == "stopped"
+	}
+	jout(w, 200, map[string]any{"intel": intel.Drain(taskID), "stopped": stopped})
 }
 
 // buildKnowledgeBlock 启用状态的知识条目（≤5 条 × 截断），注入任务书（蓝本 _knowledge_block）。
@@ -612,7 +618,9 @@ func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err := n.DB.Exec(`UPDATE tasks SET status=?,finished_at=?,message=? WHERE id=?`,
+	// 已停止的任务不覆盖状态（操作员停止优先于执行结果），数据照常入库
+	if _, err := n.DB.Exec(`UPDATE tasks SET status=CASE WHEN status='stopped' THEN status ELSE ? END,
+		finished_at=?, message=? WHERE id=?`,
 		status, store.Now(), req.Message, req.TaskID); err != nil {
 		jerr(w, 500, err.Error())
 		return

@@ -162,7 +162,7 @@ func (a *API) StopTask(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, 500, err.Error())
 		return
 	}
-	if status != "running" && status != "pending" {
+	if status != "running" && status != "pending" && status != "assigned" {
 		respondErr(w, 400, "task not running")
 		return
 	}

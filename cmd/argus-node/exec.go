@@ -89,10 +89,13 @@ func execTask(p *pollTask) *pipeline.Result {
 	brief := p.buildBrief()
 	// HITL 审批门：经 server HTTP 回连（名单命中时写 pending + 轮询人工决定）
 	brief.ApprovalGate = approvalGate{taskID: brief.TaskID, projectID: brief.ProjectID}
-	// 运行中情报：后台轮询 server 攒队列，agent 每步 Drain
+	// 运行中情报：后台轮询 server 攒队列，agent 每步 Drain；
+	// 轮询同时探测任务停止（server 标记 stopped → 5s 内取消执行）
 	iq := &intelQueue{}
 	brief.IntelQueue = iq
-	stopIntel := startIntelPoller(brief.TaskID, iq)
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancelExec()
+	stopIntel := startIntelPoller(brief.TaskID, iq, cancelExec)
 	defer stopIntel()
 	// MCP 动态工具注入（启用的服务器 → 全局 Registry，agent 即刻可用）
 	if n := registerMCPTools(p.MCP); n > 0 {
@@ -117,5 +120,5 @@ func execTask(p *pollTask) *pipeline.Result {
 	}
 	log.Printf("[exec] task=%d name=%s mode=%s project=%d → pipeline",
 		p.Task.TaskID, p.Task.Name, p.Task.Mode, p.Task.ProjectID)
-	return pipeline.Run(context.Background(), brief, onFlush)
+	return pipeline.Run(execCtx, brief, onFlush)
 }
