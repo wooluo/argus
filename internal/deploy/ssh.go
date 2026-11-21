@@ -98,13 +98,59 @@ func Deploy(cfg SSHConfig) Result {
 	}
 	step("二进制已上传")
 
-	// 5. 安装 + 配置 systemd + 启动
-	// root 登录不用 sudo（minimal 镜像可能未装）；service 文件走 base64
-	// 传输，避开 heredoc/引号/转义在 SSH 单命令里的兼容性坑。
-	sudo := "sudo "
-	if cfg.Username == "root" {
-		sudo = ""
+	// 5. 安装 + 配置 systemd + 启动——分步执行，每步独立报错（单条长命令
+	// 在部分 VPS 上出现过 exit 0 + 零输出 + 无 DEPLOY_OK 的幽灵失败，
+	// 无法定位；分步后失败信息精确到步骤和原始输出）。
+	runStep := func(name, cmd string) error {
+		s, err := client.NewSession()
+		if err != nil {
+			return fmt.Errorf("%s: 创建会话失败: %w", name, err)
+		}
+		defer s.Close()
+		var out bytes.Buffer
+		s.Stdout = &out
+		s.Stderr = &out
+		if err := s.Run(cmd); err != nil {
+			return fmt.Errorf("%s 失败: %v\n远端输出: %s", name, err,
+				tools.Truncate(out.String(), 1000))
+		}
+		step(name + " ✓  " + tools.Truncate(strings.TrimSpace(out.String()), 120))
+		return nil
 	}
+
+	// 5.1 环境探测：uid / sudo / base64 / systemctl 是否可用（决定安装策略）
+	var probeOut bytes.Buffer
+	if ps, err := client.NewSession(); err == nil {
+		ps.Stdout = &probeOut
+		ps.Stderr = &probeOut
+		_ = ps.Run(`id -u; for c in sudo base64 systemctl tee install; do command -v $c >/dev/null 2>&1 && echo "$c=yes" || echo "$c=NO"; done`)
+		ps.Close()
+	}
+	probe := probeOut.String()
+	isRoot := strings.HasPrefix(probe, "0")
+	hasSudo := strings.Contains(probe, "sudo=yes")
+	hasBase64 := strings.Contains(probe, "base64=yes")
+	hasSystemd := strings.Contains(probe, "systemctl=yes")
+	step("环境探测: " + tools.Truncate(strings.Join(strings.Fields(probe), " "), 160))
+
+	sudo := ""
+	if !isRoot {
+		if !hasSudo {
+			return fail("远端非 root 且无 sudo，无法安装（请用 root 登录部署）\n探测输出: " + probe)
+		}
+		sudo = "sudo "
+	}
+	if !hasSystemd {
+		return fail("远端无 systemctl（非 systemd 系统？）\n探测输出: " + probe)
+	}
+
+	// 5.2 安装二进制
+	if err := runStep("安装二进制",
+		sudo+"install -m 755 /tmp/argus-node /usr/local/bin/argus-node"); err != nil {
+		return fail(err.Error())
+	}
+
+	// 5.3 写 service 文件（base64 优先；无 base64 时逐行 printf 追加）
 	svc := fmt.Sprintf(`[Unit]
 Description=Argus Pentest Node
 After=network.target
@@ -121,28 +167,40 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 `, cfg.ServerURL, cfg.NodeName, cfg.NodeToken)
-	svcB64 := base64.StdEncoding.EncodeToString([]byte(svc))
-	installCmd := fmt.Sprintf(
-		`%sinstall -m 755 /tmp/argus-node /usr/local/bin/argus-node && `+
-			`echo %s | base64 -d | %stee /etc/systemd/system/argus-node.service > /dev/null && `+
-			`%ssystemctl daemon-reload && %ssystemctl enable argus-node && `+
-			`%ssystemctl restart argus-node && echo DEPLOY_OK`,
-		sudo, svcB64, sudo, sudo, sudo, sudo)
+	if hasBase64 {
+		svcB64 := base64.StdEncoding.EncodeToString([]byte(svc))
+		if err := runStep("写入 service（base64）",
+			fmt.Sprintf(`echo %s | base64 -d > /tmp/argus-node.service && %scp /tmp/argus-node.service /etc/systemd/system/argus-node.service`,
+				svcB64, sudo)); err != nil {
+			return fail(err.Error())
+		}
+	} else {
+		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+		if err := runStep("清空临时 service", sudo+"rm -f /tmp/argus-node.service"); err != nil {
+			return fail(err.Error())
+		}
+		for _, line := range strings.Split(strings.TrimRight(svc, "\n"), "\n") {
+			cmd := fmt.Sprintf("%sprintf '%%s\\n' %s >> /tmp/argus-node.service",
+				sudo, shellQuote(line))
+			if err := runStep("写入 service 行", cmd); err != nil {
+				return fail(err.Error())
+			}
+		}
+		if err := runStep("安装 service 文件",
+			sudo+"cp /tmp/argus-node.service /etc/systemd/system/argus-node.service"); err != nil {
+			return fail(err.Error())
+		}
+	}
 
-	s2, err := client.NewSession()
-	if err != nil {
-		return fail(fmt.Sprintf("创建安装会话失败: %v", err))
+	// 5.4 systemd 三连
+	if err := runStep("daemon-reload", sudo+"systemctl daemon-reload"); err != nil {
+		return fail(err.Error())
 	}
-	defer s2.Close()
-	var installOut bytes.Buffer
-	s2.Stdout = &installOut
-	s2.Stderr = &installOut
-	if err := s2.Run(installCmd); err != nil {
-		return fail(fmt.Sprintf("安装失败: %v\n输出: %s", err,
-			tools.Truncate(installOut.String(), 1500)))
+	if err := runStep("enable 开机自启", sudo+"systemctl enable argus-node"); err != nil {
+		return fail(err.Error())
 	}
-	if !strings.Contains(installOut.String(), "DEPLOY_OK") {
-		return fail("安装输出异常: " + tools.Truncate(installOut.String(), 1500))
+	if err := runStep("restart 启动服务", sudo+"systemctl restart argus-node"); err != nil {
+		return fail(err.Error())
 	}
 	step("systemd 服务已创建并启动")
 
