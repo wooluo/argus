@@ -144,6 +144,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/settings/fofa", a.GetFofaConfig)
 		apig.Put("/api/settings/fofa", a.PutFofaConfig)
 		apig.Get("/api/tools", a.ToolsStatus)
+		apig.Post("/api/tools/install", a.InstallTools) // 一键安装缺失外部工具
 
 		// Extension 域（蓝本 api/extension.py）
 		apig.Get("/api/agents", a.ListAgents)
