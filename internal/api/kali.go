@@ -136,6 +136,7 @@ func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	host, _ := in["host"].(string)
+	host = strings.TrimSpace(host)
 	if host == "" {
 		respondErr(w, http.StatusBadRequest, "host 必填")
 		return
@@ -161,7 +162,7 @@ func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
 	out, err := deploy.RunSSH(host, port, user, authType, pass, keyPEM, "echo SSH_OK", 10*time.Second)
 	if err != nil || !strings.Contains(out, "SSH_OK") {
 		// SSH 失败给出 TCP 兜底诊断（区分网络不通 vs 认证失败）
-		msg := fmt.Sprintf("SSH 登录失败: %v", err)
+		msg := fmt.Sprintf("SSH 登录失败: %v（host=%q）", err, host)
 		addr := net.JoinHostPort(host, strconv.Itoa(port))
 		if conn, derr := net.DialTimeout("tcp", addr, 5*time.Second); derr == nil {
 			_ = conn.Close()
@@ -197,7 +198,7 @@ func (a *API) KaliHostMetrics(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		name, _ := h["name"].(string)
-		host, _ := h["host"].(string)
+		host := strings.TrimSpace(strValue(h["host"]))
 		now := time.Now().UTC().Format(time.RFC3339)
 		metricsMu.Lock()
 		if c, ok := metricsCache[id]; ok && time.Since(c.at) < 15*time.Second {
@@ -345,7 +346,7 @@ func (a *API) KaliHostActivity(w http.ResponseWriter, r *http.Request) {
 		if hid, _ := h["id"].(string); hid != id {
 			continue
 		}
-		host, _ := h["host"].(string)
+		host := strings.TrimSpace(strValue(h["host"]))
 		rows, err := a.DB.Query(
 			`SELECT tool,content,created_at FROM agent_logs
 			 WHERE tool IN ('kali_exec','run_script','kali_install')
@@ -392,4 +393,10 @@ func (a *API) DeleteKaliHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// strValue map 取 string（清洗隐藏字符用）。
+func strValue(v any) string {
+	s, _ := v.(string)
+	return s
 }

@@ -416,6 +416,11 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 
 // sshConnect 建立 SSH 连接（密码或密钥）。
 func sshConnect(cfg SSHConfig) (*ssh.Client, error) {
+	// host 清洗：隐藏字符（复制粘贴的空格/零宽）会让纯 IP 被当域名 lookup
+	cfg.Host = strings.TrimSpace(cfg.Host)
+	if cfg.Host == "" {
+		return nil, fmt.Errorf("主机地址不能为空")
+	}
 	var authMethod ssh.AuthMethod
 	switch cfg.AuthType {
 	case "password":
