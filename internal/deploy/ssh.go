@@ -140,30 +140,49 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return nil
 	}
 
-	// 5.1 环境探测：uid / sudo / base64 / systemctl 是否可用（决定安装策略）
-	var probeOut bytes.Buffer
-	if ps, err := client.NewSession(); err == nil {
-		ps.Stdout = &probeOut
-		ps.Stderr = &probeOut
-		_ = runCmd(ps, `id -u; for c in sudo base64 systemctl tee install; do command -v $c >/dev/null 2>&1 && echo "$c=yes" || echo "$c=NO"; done`, 30*time.Second)
-		ps.Close()
+	// 5.1 环境探测：逐条独立执行（实测单条组合命令 `for + $var` 在部分
+	// VPS shell 下零输出，导致误判"非 root 且无 sudo"）。每条最简无变量
+	// 无循环；echo 自检不过 = 远端 exec 输出通道异常，直接明确报错。
+	probeOne := func(cmd string) string {
+		s, err := client.NewSession()
+		if err != nil {
+			return ""
+		}
+		defer s.Close()
+		var b bytes.Buffer
+		s.Stdout = &b
+		s.Stderr = &b
+		_ = runCmd(s, cmd, 15*time.Second)
+		return strings.TrimSpace(b.String())
 	}
-	probe := probeOut.String()
-	isRoot := strings.HasPrefix(probe, "0")
-	hasSudo := strings.Contains(probe, "sudo=yes")
-	hasBase64 := strings.Contains(probe, "base64=yes")
-	hasSystemd := strings.Contains(probe, "systemctl=yes")
-	step("环境探测: " + tools.Truncate(strings.Join(strings.Fields(probe), " "), 160))
+	if sanity := probeOne("echo PROBE_OK"); sanity != "PROBE_OK" {
+		return fail(fmt.Sprintf(
+			"远端命令无输出（echo 都不回显：sshd/shell 环境异常，echo 返回 %q）"+
+				"——检查 VPS 的登录 shell（cat /etc/passwd | grep %s）",
+			sanity, cfg.Username))
+	}
+	uid := probeOne("id -u")
+	sudoWork := probeOne("sudo -n true 2>/dev/null && echo SUDO_OK || echo SUDO_NO")
+	sysd := probeOne("systemctl --version 2>/dev/null | head -1")
+	b64 := probeOne("base64 --version 2>/dev/null | head -1 || echo NOBASE64")
+	isRoot := uid == "0"
+	hasSudo := strings.Contains(sudoWork, "SUDO_OK")
+	hasBase64 := !strings.Contains(b64, "NOBASE64") && b64 != ""
+	hasSystemd := sysd != ""
+	step(fmt.Sprintf("环境探测: uid=%s sudo=%v systemd=%q base64=%v",
+		orDefaultStr(uid, "?"), hasSudo, tools.Truncate(sysd, 40), hasBase64))
 
 	sudo := ""
 	if !isRoot {
 		if !hasSudo {
-			return fail("远端非 root 且无 sudo，无法安装（请用 root 登录部署）\n探测输出: " + probe)
+			return fail(fmt.Sprintf(
+				"远端用户 %s 非 root（uid=%q）且 sudo 不可用（%s）——请用 root 登录部署，或给该用户配免密 sudo",
+				cfg.Username, uid, sudoWork))
 		}
 		sudo = "sudo "
 	}
 	if !hasSystemd {
-		return fail("远端无 systemctl（非 systemd 系统？）\n探测输出: " + probe)
+		return fail("远端无 systemctl（非 systemd 系统？）")
 	}
 
 	// 5.2 安装二进制
@@ -382,4 +401,12 @@ func goArchOf(unameArch string) string {
 	default:
 		return ""
 	}
+}
+
+// orDefaultStr 空串回默认值（探测展示用）。
+func orDefaultStr(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
