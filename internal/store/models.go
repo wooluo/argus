@@ -67,18 +67,26 @@ type Project struct {
 type Task struct {
 	ID           int     `json:"id"`
 	ProjectID    int     `json:"project_id"`
-	Name         string  `json:"name"`
-	Status       string  `json:"status"`
-	Mode         string  `json:"mode"`
-	CurrentStage string  `json:"current_stage"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Mode         string `json:"mode"`
+	CurrentStage string `json:"current_stage"`
 	Tokens       RawJSON `json:"tokens"`
 	StagesDone   RawJSON `json:"stages_done"`
-	Message      string  `json:"message"`
-	CreatedAt    string  `json:"created_at"`
+	Message      string `json:"message"`
+	CreatedAt    string `json:"created_at"`
 	StartedAt    any     `json:"started_at"`
 	FinishedAt   any     `json:"finished_at"`
 	NodeID       int     `json:"node_id"`
 	AssignedAt   any     `json:"assigned_at"`
+	// IsLive 运行时计算（非 DB 列）：pull 架构下 pending/assigned/running 均为
+	// 在途（蓝本 is_live 契约，前端启停按钮依赖）。
+	IsLive bool `json:"is_live"`
+}
+
+// MarkLive 按状态计算 is_live。
+func (t *Task) MarkLive() {
+	t.IsLive = t.Status == "pending" || t.Status == "assigned" || t.Status == "running"
 }
 
 type Asset struct {

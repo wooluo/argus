@@ -43,6 +43,7 @@ func (a *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		t.StartedAt = nilStr(started)
 		t.FinishedAt = nilStr(finished)
+		t.MarkLive()
 		out = append(out, t)
 	}
 	respondJSON(w, 200, out)
@@ -141,6 +142,7 @@ func (a *API) getTaskByID(w http.ResponseWriter, id int64) {
 	}
 	t.StartedAt = nilStr(started)
 	t.FinishedAt = nilStr(finished)
+	t.MarkLive()
 	respondJSON(w, 200, t)
 }
 
