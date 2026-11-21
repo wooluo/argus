@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,7 +69,16 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 			return fmt.Errorf("命令超时（>%s）: %.80s", timeout, cmd)
 		}
 	}
-	// probeOne 独立会话取命令输出（探测/校验通用；幽灵时返回空串）
+
+	// 1. 建立 SSH 连接
+	client, err := sshConnect(cfg)
+	if err != nil {
+		return fail(fmt.Sprintf("SSH 连接失败: %v", err))
+	}
+	defer client.Close()
+	step("SSH 连接成功")
+
+	// probeOne 独立会话取命令输出（探测/上传校验通用；幽灵时返回空串）
 	probeOne := func(cmd string) string {
 		s, err := client.NewSession()
 		if err != nil {
@@ -81,14 +91,6 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		_ = runCmd(s, cmd, 15*time.Second)
 		return strings.TrimSpace(b.String())
 	}
-
-	// 1. 建立 SSH 连接
-	client, err := sshConnect(cfg)
-	if err != nil {
-		return fail(fmt.Sprintf("SSH 连接失败: %v", err))
-	}
-	defer client.Close()
-	step("SSH 连接成功")
 
 	session, err := client.NewSession()
 	if err != nil {
