@@ -44,6 +44,7 @@ func migrate(db *sql.DB) error {
 
 var alters = []string{
 	`ALTER TABLE tasks ADD COLUMN continue_from INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE nodes ADD COLUMN host TEXT NOT NULL DEFAULT ''`,
 }
 
 var migrations = []string{

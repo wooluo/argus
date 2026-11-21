@@ -59,7 +59,7 @@ func genNodeToken() string {
 
 // ListNodes: GET /api/nodes/ （管理面，UI 用）
 func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
-	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at FROM nodes ORDER BY id`)
+	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at,host FROM nodes ORDER BY id`)
 	if err != nil {
 		jerr(w, 500, err.Error())
 		return
@@ -74,13 +74,26 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 		Status    string `json:"status"`
 		LastSeen  string `json:"last_seen"`
 		CreatedAt string `json:"created_at"`
+		Host      string `json:"host"`
 	}
 	out := []nodeRow{}
 	for rows.Next() {
 		var v nodeRow
-		if err := rows.Scan(&v.ID, &v.Name, &v.Platform, &v.Hostname, &v.Version, &v.Status, &v.LastSeen, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Platform, &v.Hostname, &v.Version,
+			&v.Status, &v.LastSeen, &v.CreatedAt, &v.Host); err != nil {
 			jerr(w, 500, err.Error())
 			return
+		}
+		// 状态动态化：deploying/deploy_failed 原样；其余按心跳新鲜度判
+		// （心跳周期 15s，45s 容忍）
+		if v.Status != "deploying" && v.Status != "deploy_failed" {
+			v.Status = "offline"
+			if v.LastSeen != "" {
+				if t, err := time.Parse("2006-01-02T15:04:05.000Z", v.LastSeen); err == nil &&
+					time.Since(t) < 45*time.Second {
+					v.Status = "online"
+				}
+			}
 		}
 		out = append(out, v)
 	}
@@ -91,6 +104,7 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 func (n *NodeAPI) Register(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name         string   `json:"name"`
+		Platform     string   `json:"platform"`
 		Capabilities []string `json:"capabilities"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
@@ -99,13 +113,21 @@ func (n *NodeAPI) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := genNodeToken()
 	caps, _ := json.Marshal(req.Capabilities)
-	res, err := n.DB.Exec(`INSERT INTO nodes(name,token,capabilities,status,last_seen) VALUES(?,?,?,?,?)`,
-		req.Name, tok, string(caps), "online", store.Now())
+	// UPSERT：SSH 部署会预插 deploying 行——注册即激活（换 token 上线），
+	// 重复注册（节点重装/重试）也是换 token 续用同一行。
+	res, err := n.DB.Exec(`
+		INSERT INTO nodes(name,token,capabilities,platform,status,last_seen) VALUES(?,?,?,?, 'online', ?)
+		ON CONFLICT(name) DO UPDATE SET token=excluded.token, capabilities=excluded.capabilities,
+			platform=excluded.platform, status='online', last_seen=excluded.last_seen`,
+		req.Name, tok, string(caps), req.Platform, store.Now())
 	if err != nil {
 		jerr(w, 500, err.Error())
 		return
 	}
 	id, _ := res.LastInsertId()
+	if id == 0 { // UPSERT 命中已有行时 LastInsertId 无意义——查回
+		_ = n.DB.QueryRow(`SELECT id FROM nodes WHERE name=?`, req.Name).Scan(&id)
+	}
 	if n.NodeAuth != nil {
 		n.NodeAuth.Set(tok, id)
 	}
@@ -748,9 +770,22 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// BinaryPath 留空——Deploy 内部会检测远端架构自动选择
 
+	// 部署即上屏：预插 deploying 行（注册 UPSERT 激活），Web 界面立即可见
+	_, _ = n.DB.Exec(`
+		INSERT INTO nodes(name,token,platform,status,last_seen,host)
+		VALUES(?, '', '', 'deploying', '', ?)
+		ON CONFLICT(name) DO UPDATE SET status='deploying', last_seen='', host=excluded.host`,
+		req.NodeName, req.Host)
+
 	// 异步部署（SSH 可能 10-30 秒）
 	go func() {
 		result := deploy.Deploy(req)
+		if !result.OK {
+			// 失败且节点尚未注册（仍 deploying）→ 标记部署失败（注册成功则保持 online）
+			_, _ = n.DB.Exec(
+				`UPDATE nodes SET status='deploy_failed' WHERE name=? AND status='deploying'`,
+				req.NodeName)
+		}
 		n.Bus.Publish("node_deploy", map[string]any{
 			"node_name": req.NodeName, "host": req.Host, "result": result,
 		})
