@@ -180,29 +180,36 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	// 回显稳定：每条命令包装 `( cmd ) && echo __OK__ || echo __FAIL__$?`，
 	// 以标记判成败；失败自动重试一次。
 	runStepRaw := func(name, cmd string) error {
-		s, err := client.NewSession()
-		if err != nil {
-			return fmt.Errorf("%s: 创建会话失败: %w", name, err)
+		// 幽灵间歇（同连接快速开会话输出丢失，实测上传大文件后高发）→
+		// 内部验证标记 + 重试 3 次；真实失败（__ARGUS_FAIL_）立即返回不重试。
+		var lastErr error
+		for range 3 {
+			s, err := client.NewSession()
+			if err != nil {
+				return fmt.Errorf("%s: 创建会话失败: %w", name, err)
+			}
+			var out bytes.Buffer
+			s.Stdout = &out
+			s.Stderr = &out
+			wrapped := "( " + cmd + " ) && echo __ARGUS_OK__ || echo __ARGUS_FAIL_$?"
+			rerr := runCmd(s, wrapped, 120*time.Second)
+			s.Close()
+			o := out.String()
+			switch {
+			case strings.Contains(o, "__ARGUS_FAIL_"):
+				return fmt.Errorf("%s 失败（远端输出: %s）", name, tools.Truncate(o, 800))
+			case strings.Contains(o, "__ARGUS_OK__"):
+				step(name + " ✓  " + tools.Truncate(strings.TrimSpace(strings.ReplaceAll(
+					strings.ReplaceAll(o, "__ARGUS_OK__", ""), "\n", " ")), 100))
+				return nil
+			case rerr != nil:
+				lastErr = fmt.Errorf("%s 失败: %v（远端输出: %s）", name, rerr, tools.Truncate(o, 800))
+			default:
+				lastErr = fmt.Errorf("%s 输出通道异常（无标记无错误，远端输出: %q）", name, tools.Truncate(o, 200))
+			}
+			time.Sleep(400 * time.Millisecond)
 		}
-		defer s.Close()
-		var out bytes.Buffer
-		s.Stdout = &out
-		s.Stderr = &out
-		wrapped := "( " + cmd + " ) && echo __ARGUS_OK__ || echo __ARGUS_FAIL_$?"
-		rerr := runCmd(s, wrapped, 120*time.Second)
-		o := out.String()
-		switch {
-		case strings.Contains(o, "__ARGUS_FAIL_"):
-			return fmt.Errorf("%s 失败（远端输出: %s）", name, tools.Truncate(o, 800))
-		case strings.Contains(o, "__ARGUS_OK__"):
-			step(name + " ✓  " + tools.Truncate(strings.TrimSpace(strings.ReplaceAll(
-				strings.ReplaceAll(o, "__ARGUS_OK__", ""), "\n", " ")), 100))
-			return nil
-		case rerr != nil:
-			return fmt.Errorf("%s 失败: %v（远端输出: %s）", name, rerr, tools.Truncate(o, 800))
-		default:
-			return fmt.Errorf("%s 输出通道异常（无标记无错误，远端输出: %q）", name, tools.Truncate(o, 200))
-		}
+		return lastErr
 	}
 	runStep := func(name, cmd string) error {
 		// 步骤间隔：x/crypto 同连接快速开会话会间歇丢失输出（另一提交实测
