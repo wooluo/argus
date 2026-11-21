@@ -87,7 +87,8 @@ func (r *retestReporter) SaveEvidence(ctx context.Context, typ, content string, 
 		r.project, "GET", content, "", 0, tools.Truncate(body, 600), "retest")
 }
 
-func (r *retestReporter) SaveAsset(context.Context, string, string, map[string]any) {}
+func (r *retestReporter) SaveAsset(context.Context, string, string, map[string]any)      {}
+func (r *retestReporter) SaveSession(context.Context, string, string, map[string]string) {}
 
 // SaveTraffic 复测也走结构化流量录制（重放报文留痕）。
 func (r *retestReporter) SaveTraffic(ctx context.Context, method, rawURL, reqBody string,

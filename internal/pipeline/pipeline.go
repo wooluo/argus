@@ -5,6 +5,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -204,6 +205,15 @@ func (m *memReporter) SaveTraffic(_ context.Context, method, rawURL, reqBody str
 		SourceTool: sourceTool,
 	})
 	m.flushLocked()
+}
+
+// SaveSession 会话上报（复用 assets 通道 type=session，零迁移；server 侧
+// ReplayTraffic 查最新会话附 cookie——pull 架构下重放带认证的唯一途径）。
+func (m *memReporter) SaveSession(ctx context.Context, baseURL, user string, cookies map[string]string) {
+	detail, _ := json.Marshal(map[string]any{"user": user, "cookies": cookies})
+	m.SaveAsset(ctx, "session", baseURL, map[string]any{
+		"detail": string(detail), "source": "web_login",
+	})
 }
 
 // SaveKnowledge 沉淀经验：经增量日志通道回传（server 侧可入库 knowledge）。

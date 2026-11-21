@@ -45,6 +45,8 @@ type Reporter interface {
 	SaveEvidence(ctx context.Context, typ, content string, meta map[string]any)
 	// SaveTraffic 结构化流量录制（http_fetch/web_login 自动落 TrafficLog，可回放）。
 	SaveTraffic(ctx context.Context, method, rawURL, reqBody string, status int, snippet, sourceTool string)
+	// SaveSession 登录会话上报（server 侧重放复放认证后请求用；节点本地另有磁盘持久化）。
+	SaveSession(ctx context.Context, baseURL, user string, cookies map[string]string)
 	// SaveKnowledge 沉淀可复用经验（后续任务自动携带）。
 	SaveKnowledge(ctx context.Context, title, content string) error
 	// SearchKnowledge 检索历史经验。

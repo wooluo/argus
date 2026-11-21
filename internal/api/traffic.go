@@ -100,7 +100,9 @@ func (a *API) ReplayTraffic(w http.ResponseWriter, r *http.Request) {
 	if method != "POST" {
 		method = "GET"
 	}
-	// server 侧重发（无节点登录会话——pull 架构限制，hint 注明）
+	// 附项目最近登录会话（web_login 时节点回传的 cookie 快照）——
+	// pull 架构下 server 无法共享节点内存会话，登录时刻快照是唯一途径
+	cookies, sessUser := a.latestSession(t.ProjectID)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	var bodyReader io.Reader
@@ -114,6 +116,9 @@ func (a *API) ReplayTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	if method == "POST" && t.ReqBody != "" {
 		req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	for k, v := range cookies {
+		req2.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
 	cl := &http.Client{
 		Timeout: 30 * time.Second,
@@ -130,8 +135,13 @@ func (a *API) ReplayTraffic(w http.ResponseWriter, r *http.Request) {
 	resp.Body.Close()
 	status2, body := resp.StatusCode, string(raw)
 	hint := ""
-	if status2 >= 400 {
-		hint = "重放返回异常状态码，目标可能需要登录会话（节点架构下重放不带会话）"
+	switch {
+	case status2 >= 400 && len(cookies) == 0:
+		hint = "重放返回异常状态码，且项目无已存登录会话（先跑一次 web_login 或人工录入凭据）"
+	case status2 >= 400:
+		hint = "重放带会话 Cookie 仍返回异常，会话可能已过期（重新触发 web_login）"
+	case len(cookies) > 0:
+		hint = "已附加登录会话（用户 " + sessUser + "）"
 	}
 	// repeater 留痕（来源=replay，可回溯）
 	_, _ = a.DB.Exec(`INSERT INTO repeater_logs(project_id,method,url,request_body,status,response_snippet,source,origin_traffic_id)
@@ -142,8 +152,26 @@ func (a *API) ReplayTraffic(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "url": t.URL, "method": method,
 		"original": map[string]any{"status": t.Status, "snippet": truncateStr(t.Snippet, 400)},
 		"replayed": map[string]any{"status": status2, "snippet": truncateStr(body, 400)},
-		"hint":     hint, "session_cookies": 0,
+		"hint":     hint, "session_cookies": len(cookies),
 	})
+}
+
+// latestSession 项目最近一次登录会话（assets 表 type='session'，web_login 回传）。
+func (a *API) latestSession(projectID int64) (map[string]string, string) {
+	var detail sql.NullString
+	if err := a.DB.QueryRow(
+		`SELECT detail FROM assets WHERE project_id=? AND type='session' ORDER BY id DESC LIMIT 1`,
+		projectID).Scan(&detail); err != nil {
+		return nil, ""
+	}
+	var s struct {
+		User    string            `json:"user"`
+		Cookies map[string]string `json:"cookies"`
+	}
+	if json.Unmarshal([]byte(detail.String), &s) != nil {
+		return nil, ""
+	}
+	return s.Cookies, s.User
 }
 
 // ================= Findings 补充端点（蓝本 assets.py read/evidence/steps/DELETE） =================

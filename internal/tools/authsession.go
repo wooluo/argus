@@ -294,6 +294,9 @@ func (WebLoginTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 	if okLogin {
 		sess.User = username
 		persistSession(tc, sess)
+		// 会话上报 server（流量重放时附 cookie 复现认证后请求；pull 架构下
+		// server 侧无法共享节点内存会话，登录时刻快照回传是唯一途径）
+		tc.Reporter.SaveSession(ctx, sess.BaseURL, username, sess.Cookies)
 		tc.Reporter.SaveAsset(ctx, "url", finalURL, map[string]any{
 			"type": "authenticated", "as": username, "source": "web_login",
 		})
