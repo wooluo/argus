@@ -6,6 +6,7 @@ package deploy
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/wooluo/argus/internal/tools"
 )
 
 // SSHConfig SSH 连接参数（UI 表单提交）。
@@ -96,9 +99,13 @@ func Deploy(cfg SSHConfig) Result {
 	step("二进制已上传")
 
 	// 5. 安装 + 配置 systemd + 启动
-	installCmd := fmt.Sprintf(`sudo install -m 755 /tmp/argus-node /usr/local/bin/argus-node &&
-sudo tee /etc/systemd/system/argus-node.service > /dev/null << 'SVCEOF'
-[Unit]
+	// root 登录不用 sudo（minimal 镜像可能未装）；service 文件走 base64
+	// 传输，避开 heredoc/引号/转义在 SSH 单命令里的兼容性坑。
+	sudo := "sudo "
+	if cfg.Username == "root" {
+		sudo = ""
+	}
+	svc := fmt.Sprintf(`[Unit]
 Description=Argus Pentest Node
 After=network.target
 
@@ -113,12 +120,14 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-SVCEOF
-sudo systemctl daemon-reload &&
-sudo systemctl enable argus-node &&
-sudo systemctl restart argus-node &&
-echo DEPLOY_OK`,
-		cfg.ServerURL, cfg.NodeName, cfg.NodeToken)
+`, cfg.ServerURL, cfg.NodeName, cfg.NodeToken)
+	svcB64 := base64.StdEncoding.EncodeToString([]byte(svc))
+	installCmd := fmt.Sprintf(
+		`%sinstall -m 755 /tmp/argus-node /usr/local/bin/argus-node && `+
+			`echo %s | base64 -d | %stee /etc/systemd/system/argus-node.service > /dev/null && `+
+			`%ssystemctl daemon-reload && %ssystemctl enable argus-node && `+
+			`%ssystemctl restart argus-node && echo DEPLOY_OK`,
+		sudo, svcB64, sudo, sudo, sudo, sudo)
 
 	s2, err := client.NewSession()
 	if err != nil {
@@ -129,10 +138,11 @@ echo DEPLOY_OK`,
 	s2.Stdout = &installOut
 	s2.Stderr = &installOut
 	if err := s2.Run(installCmd); err != nil {
-		return fail(fmt.Sprintf("安装失败: %v\n输出: %s", err, installOut.String()[:min(500, installOut.Len())]))
+		return fail(fmt.Sprintf("安装失败: %v\n输出: %s", err,
+			tools.Truncate(installOut.String(), 1500)))
 	}
 	if !strings.Contains(installOut.String(), "DEPLOY_OK") {
-		return fail("安装输出异常: " + installOut.String()[:min(300, installOut.Len())])
+		return fail("安装输出异常: " + tools.Truncate(installOut.String(), 1500))
 	}
 	step("systemd 服务已创建并启动")
 
