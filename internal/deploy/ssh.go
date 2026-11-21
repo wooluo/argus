@@ -119,10 +119,12 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	}
 	step("二进制已上传")
 
-	// 5. 安装 + 配置 systemd + 启动——分步执行，每步独立报错（单条长命令
-	// 在部分 VPS 上出现过 exit 0 + 零输出 + 无 DEPLOY_OK 的幽灵失败，
-	// 无法定位；分步后失败信息精确到步骤和原始输出）。每步 120s 超时。
-	runStep := func(name, cmd string) error {
+	// 5. 安装 + 配置 systemd + 启动——分步执行 + echo 标记判定 + 失败重试。
+	// 该 VPS 的 exec 通道存在间歇性幽灵（外部命令输出/exit 码随机丢失，
+	// systemctl 一次探测不到、一次能到）——exit 码不可信，但内建 echo 的
+	// 回显稳定：每条命令包装 `( cmd ) && echo __OK__ || echo __FAIL__$?`，
+	// 以标记判成败；失败自动重试一次。
+	runStepRaw := func(name, cmd string) error {
 		s, err := client.NewSession()
 		if err != nil {
 			return fmt.Errorf("%s: 创建会话失败: %w", name, err)
@@ -131,11 +133,29 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		var out bytes.Buffer
 		s.Stdout = &out
 		s.Stderr = &out
-		if err := runCmd(s, cmd, 120*time.Second); err != nil {
-			return fmt.Errorf("%s 失败: %v\n远端输出: %s", name, err,
-				tools.Truncate(out.String(), 1000))
+		wrapped := "( " + cmd + " ) && echo __ARGUS_OK__ || echo __ARGUS_FAIL_$?"
+		rerr := runCmd(s, wrapped, 120*time.Second)
+		o := out.String()
+		switch {
+		case strings.Contains(o, "__ARGUS_FAIL_"):
+			return fmt.Errorf("%s 失败（远端输出: %s）", name, tools.Truncate(o, 800))
+		case strings.Contains(o, "__ARGUS_OK__"):
+			step(name + " ✓  " + tools.Truncate(strings.TrimSpace(strings.ReplaceAll(
+				strings.ReplaceAll(o, "__ARGUS_OK__", ""), "\n", " ")), 100))
+			return nil
+		case rerr != nil:
+			return fmt.Errorf("%s 失败: %v（远端输出: %s）", name, rerr, tools.Truncate(o, 800))
+		default:
+			return fmt.Errorf("%s 输出通道异常（无标记无错误，远端输出: %q）", name, tools.Truncate(o, 200))
 		}
-		step(name + " ✓  " + tools.Truncate(strings.TrimSpace(out.String()), 120))
+	}
+	runStep := func(name, cmd string) error {
+		if err := runStepRaw(name, cmd); err != nil {
+			time.Sleep(800 * time.Millisecond) // 幽灵间歇 → 重试一次
+			if err2 := runStepRaw(name+"（重试）", cmd); err2 != nil {
+				return err2
+			}
+		}
 		return nil
 	}
 
@@ -164,9 +184,16 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	if uid == "" {
 		uid = probeOne("/bin/id -u")
 	}
+	if uid == "" {
+		uid = probeOne("id -u") // 幽灵间歇 → 再试一次
+	}
 	sysctlPath := ""
 	for _, p := range []string{"/usr/bin/systemctl", "/bin/systemctl", "/sbin/systemctl"} {
-		if ver := probeOne(p + " --version"); strings.Contains(ver, "systemd") {
+		ver := probeOne(p + " --version")
+		if !strings.Contains(ver, "systemd") {
+			ver = probeOne(p + " --version") // 幽灵间歇 → 再试
+		}
+		if strings.Contains(ver, "systemd") {
 			sysctlPath = p
 			break
 		}
@@ -191,9 +218,10 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		sudo = "sudo "
 	}
 
-	// 5.2 安装二进制：只用已验证可用的原语（cp + chmod，不依赖 install）
+	// 5.2 安装二进制：mkdir 兜底（minimal 容器可能没有 /usr/local/bin）+
+	// cp + chmod（只用已验证可用的原语）
 	if err := runStep("安装二进制",
-		sudo+"cp /tmp/argus-node /usr/local/bin/argus-node && chmod 755 /usr/local/bin/argus-node"); err != nil {
+		sudo+"mkdir -p /usr/local/bin && cp /tmp/argus-node /usr/local/bin/argus-node && chmod 755 /usr/local/bin/argus-node"); err != nil {
 		return fail(err.Error())
 	}
 
