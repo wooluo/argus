@@ -57,8 +57,15 @@ func main() {
 		}
 	}
 
-	if !heartbeat() && !registerAndSave(tokFile) {
-		log.Fatalf("heartbeat rejected: %s", serverURL)
+	// 启动心跳失败不再 Fatal——server 可能在重启窗口（部署更新时节点会
+	// 撞上 connection refused，自杀会让 systemd 循环重启且丢执行中任务）。
+	// 改为无限重试直到 server 恢复。
+	for !heartbeat() {
+		if registerAndSave(tokFile) && heartbeat() {
+			break
+		}
+		log.Printf("heartbeat rejected（server 重启中？5s 后重试）: %s", serverURL)
+		time.Sleep(5 * time.Second)
 	}
 
 	stop := make(chan os.Signal, 1)
