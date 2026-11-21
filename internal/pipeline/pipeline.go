@@ -83,6 +83,14 @@ type Result struct {
 	Traffic  []TrafficItem    `json:"traffic,omitempty"`
 	Report   string           `json:"report"`
 	Tokens   map[string]int64 `json:"tokens,omitempty"`
+	// Reported 经 progress 增量已上报的条数（findings/assets/logs/traffic）——
+	// 最终 ReportResult 只需发 [Reported.X:] 之后的增量，避免全量双写。
+	Reported struct {
+		Findings int `json:"findings"`
+		Assets   int `json:"assets"`
+		Logs     int `json:"logs"`
+		Traffic  int `json:"traffic"`
+	} `json:"reported"`
 }
 
 // TrafficItem 结构化流量（http_fetch/web_login 自动录制，server 落 traffic_logs）。

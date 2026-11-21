@@ -112,10 +112,11 @@ func pollAndRun() bool {
 		"task_id":  p.Task.TaskID,
 		"status":   res.Status,
 		"message":  fmt.Sprintf("%s（node %s, %.1fs）", res.Message, nodeName, elapsed),
-		"findings": res.Findings,
-		"assets":   res.Assets,
-		"logs":     res.Logs,
-		"traffic":  res.Traffic,
+		// 只发 progress 未上报过的增量（最终 result 全量会造成双写重复）
+		"findings": res.Findings[minInt(res.Reported.Findings, len(res.Findings)):],
+		"assets":   res.Assets[minInt(res.Reported.Assets, len(res.Assets)):],
+		"logs":     res.Logs[minInt(res.Reported.Logs, len(res.Logs)):],
+		"traffic":  res.Traffic[minInt(res.Reported.Traffic, len(res.Traffic)):],
 	}
 	if res.Report != "" {
 		payload["report"] = res.Report
@@ -236,4 +237,11 @@ func homeDir() string {
 		return "."
 	}
 	return h
+}
+
+func minInt(a, b int) int {
+	if a > b {
+		return b
+	}
+	return a
 }

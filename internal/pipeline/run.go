@@ -78,6 +78,11 @@ func Run(ctx context.Context, b Brief, onFlush func(Result)) *Result {
 	} else {
 		runStaged(ctx, b, tc, rep, res, client)
 	}
+	// 记录经 progress 已增量上报的条数（节点最终 result 只发增量，防双写）
+	rep.mu.Lock()
+	res.Reported.Findings, res.Reported.Assets = rep.sentF, rep.sentA
+	res.Reported.Logs, res.Reported.Traffic = rep.sentL, rep.sentT
+	rep.mu.Unlock()
 	// 自我迭代：任务完成后自动复盘（尽力而为，失败不影响结果）
 	reflectAfterRun(ctx, b, res, rep, client)
 	return res

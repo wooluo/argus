@@ -662,9 +662,12 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 		if sev == "" {
 			sev = "info"
 		}
+		// 去重（蓝本 report_finding 自动去重）：同项目同名同目标已存在则跳过
+		//（agent 跨步骤重复上报 / progress+result 双写的兜底）
 		res, err := n.DB.Exec(`INSERT INTO findings(project_id,name,severity,target,detail,evidence,poc,source)
-			SELECT project_id,?,?,?,?,?,?,'node' FROM tasks WHERE id=?`,
-			f.Name, sev, f.Target, f.Detail, f.Evidence, f.PoC, taskID)
+			SELECT project_id,?,?,?,?,?,?,'node' FROM tasks WHERE id=?
+			AND NOT EXISTS(SELECT 1 FROM findings fl WHERE fl.project_id=tasks.project_id AND fl.name=? AND fl.target=?)`,
+			f.Name, sev, f.Target, f.Detail, f.Evidence, f.PoC, taskID, f.Name, f.Target)
 		if err != nil {
 			return err
 		}
@@ -677,9 +680,11 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 		}
 	}
 	for _, s := range req.Assets {
+		// 去重：同项目同类型同值已存在则更新 detail（资产回流合并而非堆行）
 		if _, err := n.DB.Exec(`INSERT INTO assets(project_id,type,value,detail,source)
-			SELECT project_id,?,?,?,'node' FROM tasks WHERE id=?`,
-			s.Type, s.Value, s.Detail, taskID); err != nil {
+			SELECT project_id,?,?,?,'node' FROM tasks WHERE id=?
+			AND NOT EXISTS(SELECT 1 FROM assets a WHERE a.project_id=tasks.project_id AND a.type=? AND a.value=?)`,
+			s.Type, s.Value, s.Detail, taskID, s.Type, s.Value); err != nil {
 			return err
 		}
 	}
