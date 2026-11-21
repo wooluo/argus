@@ -159,10 +159,32 @@ func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	out, err := deploy.RunSSH(host, port, user, authType, pass, keyPEM, "echo SSH_OK", 10*time.Second)
-	if err != nil || !strings.Contains(out, "SSH_OK") {
+	// echo 重试 3 次：该类 VPS 存在 x/crypto SSH 输出间歇丢失（命令成功
+	// 但 stdout 被吞，err=<nil> 且无 SSH_OK）——任一次拿到标记即算通。
+	var out string
+	var err error
+	for i := 0; i < 3; i++ {
+		out, err = deploy.RunSSH(host, port, user, authType, pass, keyPEM, "echo SSH_OK", 10*time.Second)
+		if strings.Contains(out, "SSH_OK") {
+			err = nil
+			break
+		}
+		if err != nil {
+			break // 真实错误（认证/网络）不重试
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if !strings.Contains(out, "SSH_OK") {
+		if err == nil {
+			// TCP+认证已过、命令成功但输出被吞——按可用处理并如实标注
+			respondJSON(w, http.StatusOK, map[string]any{
+				"ok":   true,
+				"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d；远端输出被吞无法回显，该机已知 SSH 库输出丢失问题）", user, host, port),
+			})
+			return
+		}
 		// SSH 失败给出 TCP 兜底诊断（区分网络不通 vs 认证失败）
-		msg := fmt.Sprintf("SSH 登录失败: %v（host=%q）", err, host)
+		msg := fmt.Sprintf("SSH 登录失败: %v（host=%q user=%q）", err, host, user)
 		addr := net.JoinHostPort(host, strconv.Itoa(port))
 		if conn, derr := net.DialTimeout("tcp", addr, 5*time.Second); derr == nil {
 			_ = conn.Close()
