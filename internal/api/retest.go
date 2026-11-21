@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wooluo/argus/internal/llm"
+	"github.com/wooluo/argus/internal/pipeline"
 	"github.com/wooluo/argus/internal/scope"
 	"github.com/wooluo/argus/internal/store"
 	"github.com/wooluo/argus/internal/tools"
@@ -202,8 +203,8 @@ func (a *API) RetestFinding(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// LLM 三选一判定（Agent 管理页 retester 自定义提示词覆盖 system）
-	system := "你是漏洞复测判定专家。"
+	// LLM 三选一判定（内置=实战验证的复测方法论；Agent 管理页 retester 可覆盖）
+	system := pipeline.RETESTER_SYSTEM_PROMPT
 	if custom := agentPromptSetting(a.DB, "retester"); custom != "" {
 		system = custom
 	}

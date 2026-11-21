@@ -1,6 +1,8 @@
 // pipeline 提示词与阶段工具映射，移植自 pipeline.py / agent.py / registry stages。
 package pipeline
 
+import _ "embed"
+
 // SAFETY_RULES 安全红线（agent.py SAFETY_RULES 原文）。
 const SAFETY_RULES = `## 安全与合规红线（必须遵守，违反即任务失败）
 1. 只能对授权范围内目标发起请求（工具会强制校验，范围外目标会被拒绝）
@@ -9,24 +11,19 @@ const SAFETY_RULES = `## 安全与合规红线（必须遵守，违反即任务�
 4. sqlmap 只能用于检测，绝不使用 --dump/--os-shell 等提取参数（平台已禁用）
 5. 发现高危漏洞确认后立即记录，不做进一步利用`
 
-// STAGED_SYSTEM_PROMPT 阶段模式系统提示词（{stage} 占位符）。
-const STAGED_SYSTEM_PROMPT = `你是资深渗透测试专家，正在授权范围内执行 Web 渗透测试。当前是「%s」阶段。通过调用提供的工具完成本阶段目标。
-规则：
-0. 按目标类型选工具：IP/网段目标直接探测端口与存活（nmap/port_scan/httpx/http_alive），只有域名目标才需要 subfinder 子域名枚举；拿不准先判断目标形态再行动，不要对 IP 调用域名类工具
-1. 优先把批量目标合并成一次工具调用（targets 数组），减少步数
-2. 工具返回结果已自动入库，无需重复报告全部数据，总结关键发现即可
-3. 所有外部工具都在节点渗透执行环境上执行；如果需要的工具不可用或返回「命令未找到」，先用 kali_install 安装部署（subfinder/katana/naabu 等装官方二进制、dirsearch 等 Python 工具走 pip、nuclei 模板用 nuclei-templates），装好后重试
-4. 需要平台工具链没有的能力时（爆破、协议测试、特定工具），用 kali_exec 直接执行
-5. 总结只能基于工具实际返回的数据，严禁编造未探测到的端口/服务/漏洞（不确定的写"未验证"）；完成后停止调用工具，输出本阶段总结（中文，要点式）
-`
+// 内置系统提示词（用户 wooluo 2026-11-21 在 /agents 页撰写并实战验证后
+// 收录为出厂默认——六态证据分类 / 最小影响原则 / Think-Act-Observe-Update-
+// Decide 闭环 / 按目标形态选工具。自定义 Agent 仍可整体覆盖）。
+//go:embed prompts/hunt.md
+var AUTONOMOUS_SYSTEM_PROMPT string
 
-// AUTONOMOUS_SYSTEM_PROMPT 自主模式系统提示词（方法论角色设定）。
-const AUTONOMOUS_SYSTEM_PROMPT = `你是资深渗透测试专家，对授权目标执行**完整的自主渗透测试**。
-像真人渗透测试工程师一样思考-行动-观察循环：
-每轮先简短陈述你的判断与下一步意图，再调用工具，用结果修正认知。
-全程自主决策——顺序、深度、工具选择、何时转换方向都由你判断，
-不受固定流程约束。宁可多验证一步，不可凭猜测下结论。
-`
+// STAGED_SYSTEM_PROMPT 阶段模式系统提示词（%s = 阶段名占位符）。
+//go:embed prompts/staged.md
+var STAGED_SYSTEM_PROMPT string
+
+// RETESTER_SYSTEM_PROMPT 复测判定系统提示词（api/retest.go 使用）。
+//go:embed prompts/retester.md
+var RETESTER_SYSTEM_PROMPT string
 
 // STAGES / STAGE_NAMES 五阶段（staged 模式）。
 var STAGES = []string{"recon", "mapping", "vulnscan", "verify", "report"}
