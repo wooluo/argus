@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/ssh"
 
@@ -31,6 +32,7 @@ type SSHConfig struct {
 	NodeName   string `json:"node_name"`
 	ServerURL  string `json:"server_url"`  // 节点回连地址
 	NodeToken  string `json:"node_token"`  // 节点注册 token
+	SudoPassword string `json:"sudo_password,omitempty"` // 非 root 部署的 sudo 密码（空=回退登录密码，Kali 默认二者相同）
 	BinaryPath string `json:"binary_path"` // 本机 argus-node 二进制路径
 	Tunnel     bool   `json:"tunnel"`      // SSH 隧道回连（NAT/内网 server 推荐）
 }
@@ -153,6 +155,82 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	cfg.BinaryPath = binaryPath
 	step("二进制: " + filepath.Base(binaryPath))
 
+	// 3.5 环境探测 + sudo 谈判——刻意赶在上传前：该机 exec 通道输出随机
+	// 丢失且上传大文件后高发，命令执行本身可靠。sudo 验证走「效果落盘」：
+	// sudo touch 的标记文件在磁盘上，ls 探测任意一次拿到输出即定论。
+	//（实测该 VPS 非交互 shell 下部分外部命令零输出——echo/cat/chmod/uname
+	// 可用，id/systemctl/管道/|| 偶发全空——逐条探测 + 绝对路径兜底）
+	envInfo := probeOne(`echo "SHELL=$0 PATH=$PATH"`)
+	step("远端环境: " + tools.Truncate(envInfo, 160))
+
+	uid := probeOne("id -u")
+	if uid == "" {
+		uid = probeOne("/usr/bin/id -u")
+	}
+	if uid == "" {
+		uid = probeOne("/bin/id -u")
+	}
+	if uid == "" {
+		uid = probeOne("id -u") // 幽灵间歇 → 再试一次
+	}
+	sysctlPath := ""
+	for _, p := range []string{"/usr/bin/systemctl", "/bin/systemctl", "/sbin/systemctl"} {
+		ver := probeOne(p + " --version")
+		if !strings.Contains(ver, "systemd") {
+			ver = probeOne(p + " --version") // 幽灵间歇 → 再试
+		}
+		if strings.Contains(ver, "systemd") {
+			sysctlPath = p
+			break
+		}
+	}
+	isRoot := uid == "0"
+	step(fmt.Sprintf("环境探测: uid=%q systemctl=%q", uid, orDefaultStr(sysctlPath, "未找到")))
+
+	if uid == "" && sysctlPath == "" {
+		return fail("远端 id/systemctl 均无输出（shell 环境异常）。远端环境: " + envInfo +
+			"\n请在 VPS 上执行 `echo $SHELL; echo $PATH; which systemctl` 并反馈结果")
+	}
+
+	// 非 root 需可用 sudo（root 场景跳过——用户就是 root 时最稳）。
+	// 两条路：免密 sudo（sudo -n）；密码 sudo（sudo -S 从 stdin 喂——
+	// Kali 默认用户即此形态，sudo 密码回退登录密码）。printf 是 shell 内建，
+	// 密码不落远端 ps；每条命令独立会话，sudo 时间戳缓存不可依赖，逐条完整喂。
+	sudo := ""
+	if !isRoot {
+		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+		mark := fmt.Sprintf("/tmp/.argus-sudo-%d", time.Now().UnixNano()) // 时间戳防残留误判
+		trySudo := func(feed string) bool {
+			_ = probeOne(feed + "touch " + mark) // 执行可靠，输出丢失无关紧要
+			time.Sleep(250 * time.Millisecond)
+			_ = probeOne(feed + "touch " + mark) // 双保险
+			for range 4 {
+				if out := probeOne("ls " + mark + " && echo __ARGUS_OK__ || echo __ARGUS_FAIL_"); out != "" {
+					return strings.Contains(out, "__ARGUS_OK__")
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			return false // ls 输出持续丢失，成败未知
+		}
+		switch {
+		case trySudo("sudo -n "):
+			sudo = "sudo "
+		default: // 免密不可用 → 密码 sudo
+			pw := orDefaultStr(cfg.SudoPassword, cfg.Password)
+			if pw == "" {
+				return fail(fmt.Sprintf(
+					"远端用户 %s 非 root（uid=%q）且免密 sudo 不可用——请用 root 登录部署", cfg.Username, uid))
+			}
+			sudoFeed := "printf '%s\\n' " + quote(pw) + " | sudo -S -p '' "
+			if !trySudo(sudoFeed) {
+				return fail("远端用户 " + cfg.Username + " 非 root 且 sudo 密码验证未通过" +
+					"（已试登录密码；若密码确信无误，可能为输出丢失，重试部署即可）——或改用 root 登录")
+			}
+			step("sudo 密码模式（非 root + 非免密 sudo）")
+			sudo = sudoFeed
+		}
+	}
+
 	// 4. 上传二进制（cat 写入，7MB 给足 3 分钟）+ 字节数校验
 	//（幽灵会吞掉上传错误导致 exit 0 假成功——校验远端实际字节数，
 	// 不符自动重传一次；wc 无输出时尽力而为放行）
@@ -240,54 +318,6 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return nil
 	}
 
-	// 5.1 环境探测：实测该 VPS 非交互 shell 下部分外部命令零输出
-	//（echo/cat/chmod/uname 可用，id/systemctl/base64/管道/|| 全空）——
-	// 逐条探测 + 绝对路径兜底，shell/PATH 进步骤与失败信息。
-	//（probeOne 已在开头定义）
-	envInfo := probeOne(`echo "SHELL=$0 PATH=$PATH"`)
-	step("远端环境: " + tools.Truncate(envInfo, 160))
-
-	uid := probeOne("id -u")
-	if uid == "" {
-		uid = probeOne("/usr/bin/id -u")
-	}
-	if uid == "" {
-		uid = probeOne("/bin/id -u")
-	}
-	if uid == "" {
-		uid = probeOne("id -u") // 幽灵间歇 → 再试一次
-	}
-	sysctlPath := ""
-	for _, p := range []string{"/usr/bin/systemctl", "/bin/systemctl", "/sbin/systemctl"} {
-		ver := probeOne(p + " --version")
-		if !strings.Contains(ver, "systemd") {
-			ver = probeOne(p + " --version") // 幽灵间歇 → 再试
-		}
-		if strings.Contains(ver, "systemd") {
-			sysctlPath = p
-			break
-		}
-	}
-	isRoot := uid == "0"
-	step(fmt.Sprintf("环境探测: uid=%q systemctl=%q", uid, orDefaultStr(sysctlPath, "未找到")))
-
-	if uid == "" && sysctlPath == "" {
-		return fail("远端 id/systemctl 均无输出（shell 环境异常）。远端环境: " + envInfo +
-			"\n请在 VPS 上执行 `echo $SHELL; echo $PATH; which systemctl` 并反馈结果")
-	}
-
-	// 非 root 需可用 sudo（root 场景跳过——用户就是 root 时最稳）
-	sudo := ""
-	if !isRoot {
-		sudoWork := probeOne("sudo -n true && echo SUDO_OK")
-		if !strings.Contains(sudoWork, "SUDO_OK") {
-			return fail(fmt.Sprintf(
-				"远端用户 %s 非 root（uid=%q）且 sudo 不可用（%q）——请用 root 登录部署",
-				cfg.Username, uid, sudoWork))
-		}
-		sudo = "sudo "
-	}
-
 	// 5.2 安装二进制：目录降级 + **效果验证**（cp 的 OK 标记会被幽灵吞——
 	// mkdir 全成功说明目录可写，cp"失败"极可能是误判；以目标文件字节数
 	// 等于本地下节数为准，wc 也被吞时回退标记判定）。
@@ -303,7 +333,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	for _, dir := range []string{"/usr/local/bin", "/opt/argus", "/root"} {
 		_ = runStep("mkdir "+dir, sudo+"mkdir -p "+dir)
 		cpErr := runStep("cp → "+dir,
-			sudo+"cp /tmp/argus-node "+dir+"/argus-node && chmod 755 "+dir+"/argus-node")
+			sudo+"cp /tmp/argus-node "+dir+"/argus-node && "+sudo+"chmod 755 "+dir+"/argus-node")
 		target := dir + "/argus-node"
 		if cpErr == nil || verifyBin(target) { // 标记成功 或 效果验证成功
 			if cpErr != nil {
@@ -323,20 +353,23 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	if sysctlPath == "" {
 		step("systemd 不可用（容器型 VPS？）→ 降级 nohup 后台 + cron.d 自启")
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-		// env 前缀 + nohup + 后台 + 脱离会话（stdin/stdout 重定向防 SSH 退出牵连）
+		// env 前缀 + nohup + 后台 + 脱离会话（stdin/stdout 重定向防 SSH 退出牵连；
+		// 日志写 $HOME——非 root 写不了 /var/log）
 		startCmd := fmt.Sprintf(
-			`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > /var/log/argus-node.log 2>&1 < /dev/null &`,
+			`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > ${HOME:-/tmp}/argus-node.log 2>&1 < /dev/null &`,
 			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))
 		if err := runStep("nohup 启动节点", startCmd); err != nil {
 			return fail(err.Error())
 		}
 		// 开机自启：/etc/cron.d/argus-node 单文件覆盖写（heredoc 在远端 sh
-		// 兼容层 exit 2——echo 单行 + 重定向最稳；幂等不堆行；失败不阻塞）
+		// 兼容层 exit 2——echo 单行 + tee 最稳，重定向不经 sudo 会以普通用户
+		// 落盘而失败；幂等不堆行；失败不阻塞）
 		cronLine := fmt.Sprintf("@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
 			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
-			binPath + " >> /var/log/argus-node.log 2>&1"
+			binPath + " >> ${HOME:-/tmp}/argus-node.log 2>&1"
 		if err := runStep("cron.d 自启",
-			sudo+"mkdir -p /etc/cron.d; echo "+shellQuote(cronLine)+" > /etc/cron.d/argus-node"); err != nil {
+			sudo+"mkdir -p /etc/cron.d && printf '%s\\n' "+shellQuote(cronLine)+" | "+sudo+
+				"tee /etc/cron.d/argus-node > /dev/null"); err != nil {
 			step("cron.d 自启写入失败（不影响本次运行）: " + err.Error())
 		}
 		// 验证交给 server 侧：节点 5s 内心跳注册（状态变在线即闭环）
@@ -400,23 +433,26 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	sysdOK := softStep("daemon-reload", sudo+sysctlPath+" daemon-reload") &&
 		softStep("enable 开机自启", sudo+sysctlPath+" enable argus-node")
 	if !softStep("restart 启动服务", sudo+sysctlPath+" restart argus-node") {
-		// systemd 启动不可确认 → nohup 直接拉起兜底
+		// systemd 启动不可确认 → nohup 直接拉起兜底（日志写 $HOME——非 root
+		// 写不了 /var/log）
 		step("systemd 启动不可确认 → nohup 兜底启动")
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 		_ = softStep("nohup 兜底启动",
-			fmt.Sprintf(`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > /var/log/argus-node.log 2>&1 < /dev/null &`,
+			fmt.Sprintf(`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > ${HOME:-/tmp}/argus-node.log 2>&1 < /dev/null &`,
 				shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)))
 	} else {
 		step("systemd 服务已启动")
 	}
 	if !sysdOK {
-		// enable 未知 → cron.d 兜底自启（幂等单文件）
+		// enable 未知 → cron.d 兜底自启（幂等单文件；tee 经 sudo 落盘，
+		// 重定向以普通用户执行会失败）
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 		cronLine := fmt.Sprintf("@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
 			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
-			binPath + " >> /var/log/argus-node.log 2>&1"
+			binPath + " >> ${HOME:-/tmp}/argus-node.log 2>&1"
 		_ = softStep("cron.d 兜底自启",
-			sudo+"mkdir -p /etc/cron.d; echo "+shellQuote(cronLine)+" > /etc/cron.d/argus-node")
+			sudo+"mkdir -p /etc/cron.d && printf '%s\\n' "+shellQuote(cronLine)+" | "+sudo+
+				"tee /etc/cron.d/argus-node > /dev/null")
 	}
 
 	// 6. 存活验证：is-active 同样不可信（输出被吞）——交服务器心跳判定，
@@ -470,13 +506,90 @@ const TunnelServerURL = "http://" + TunnelRemoteAddr
 // DialSSH 建立到远端的 SSH 连接（隧道管理器重连/恢复复用）。
 func DialSSH(cfg SSHConfig) (*ssh.Client, error) { return sshConnect(cfg) }
 
+// CleanHostPort 清洗用户输入的主机地址（部署表单/kali 主机表共用的坑）：
+//   - host 里内嵌端口："1.2.3.4:22"、"[::1]:2222" 自动拆出——否则
+//     JoinHostPort 见冒号拼成 "[1.2.3.4:22]:22"，整串被当域名 lookup 到超时
+//   - 剥离所有不可见字符（零宽/控制/BOM/各类 Unicode 空白——TrimSpace 去不掉 U+200B）
+//   - 全角数字/句点/冒号归一化半角（中文 IME 输入 IP 的高频坑）
+//
+// 返回清洗后的 host 与内嵌端口（无则 0）；残留无法识别的字符时报错。
+func CleanHostPort(host string) (string, int, error) {
+	var b strings.Builder
+	for _, r := range host {
+		switch {
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), unicode.IsSpace(r):
+			continue // 不可见字符一律剥（IP/域名/URL host 均不含空白）
+		case r >= 0xFF10 && r <= 0xFF19:
+			b.WriteRune(r - 0xFF10 + '0') // ０-９
+		case r == 0xFF0E || r == 0x3002:
+			b.WriteByte('.') // ．。
+		case r == 0xFF1A:
+			b.WriteByte(':') // ：
+		case r == '[' || r == ']':
+			b.WriteRune(r)
+		case r > 0x7E:
+			return "", 0, fmt.Errorf("主机地址 %q 含无法识别的字符（请用半角重新输入）", host)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	h, port := b.String(), 0
+	if h == "" {
+		return "", 0, fmt.Errorf("主机地址不能为空")
+	}
+	if strings.HasPrefix(h, "[") { // [host] / [host]:port
+		i := strings.IndexByte(h, ']')
+		if i < 0 || i == 1 {
+			return "", 0, fmt.Errorf("主机地址 %q 括号不成对", h)
+		}
+		inner, rest := h[1:i], h[i+1:]
+		if rest != "" {
+			if !strings.HasPrefix(rest, ":") || !isDigits(rest[1:]) {
+				return "", 0, fmt.Errorf("主机地址 %q 格式无法识别", h)
+			}
+			port, _ = strconv.Atoi(rest[1:])
+		}
+		h = inner
+	} else if strings.Count(h, ":") == 1 {
+		// 单冒号按 host:port 拆（多冒号 = 裸 IPv6，原样保留给 JoinHostPort 加括号）
+		i := strings.LastIndexByte(h, ':')
+		suf := h[i+1:]
+		switch {
+		case isDigits(suf):
+			port, _ = strconv.Atoi(suf)
+			h = h[:i]
+		case suf == "":
+			h = h[:i] // 尾随冒号剥掉
+		default:
+			return "", 0, fmt.Errorf("主机地址 %q 格式无法识别", h)
+		}
+	}
+	if h == "" {
+		return "", 0, fmt.Errorf("主机地址不能为空")
+	}
+	return h, port, nil
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // sshConnect 建立 SSH 连接（密码或密钥）。
 func sshConnect(cfg SSHConfig) (*ssh.Client, error) {
-	// host 清洗：隐藏字符（复制粘贴的空格/零宽）会让纯 IP 被当域名 lookup
-	cfg.Host = strings.TrimSpace(cfg.Host)
-	if cfg.Host == "" {
-		return nil, fmt.Errorf("主机地址不能为空")
+	// host 清洗：内嵌端口/全角/零宽字符统一归一（详见 CleanHostPort）
+	host, hostPort, err := CleanHostPort(cfg.Host)
+	if err != nil {
+		return nil, err
 	}
+	cfg.Host = host
 	var authMethod ssh.AuthMethod
 	switch cfg.AuthType {
 	case "password":
@@ -498,6 +611,9 @@ func sshConnect(cfg SSHConfig) (*ssh.Client, error) {
 	}
 
 	port := cfg.Port
+	if hostPort > 0 {
+		port = hostPort // host 里显式内嵌的端口优先于表单 port 字段
+	}
 	if port == 0 {
 		port = 22
 	}
