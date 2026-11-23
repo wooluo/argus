@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/wooluo/argus/internal/config"
 	"github.com/wooluo/argus/internal/store"
 )
@@ -124,7 +125,7 @@ func (a *API) knowledgeSaveMeta(kid, title string, enabled bool) {
 
 // KnowledgeContent GET /api/knowledge/{kid}/content — 原文返回。
 func (a *API) KnowledgeContent(w http.ResponseWriter, r *http.Request) {
-	kid := r.PathValue("kid")
+	kid := chi.URLParam(r, "kid")
 	data, err := os.ReadFile(filepath.Join(knowledgeDir(), kid+".md"))
 	if err != nil {
 		respondErr(w, http.StatusNotFound, "知识条目不存在")
@@ -162,7 +163,7 @@ func (a *API) PutGithubConfig(w http.ResponseWriter, r *http.Request) {
 
 // UpdateKnowledge PUT /api/knowledge/{kid} — 覆写文件+元数据。
 func (a *API) UpdateKnowledge(w http.ResponseWriter, r *http.Request) {
-	kid := r.PathValue("kid")
+	kid := chi.URLParam(r, "kid")
 	path := filepath.Join(knowledgeDir(), kid+".md")
 	if _, err := os.Stat(path); err != nil {
 		respondErr(w, http.StatusNotFound, "知识条目不存在")
@@ -188,7 +189,7 @@ func (a *API) UpdateKnowledge(w http.ResponseWriter, r *http.Request) {
 
 // DeleteKnowledge DELETE /api/knowledge/{kid} — 删文件+移除 meta。
 func (a *API) DeleteKnowledge(w http.ResponseWriter, r *http.Request) {
-	kid := r.PathValue("kid")
+	kid := chi.URLParam(r, "kid")
 	if _, err := os.Stat(filepath.Join(knowledgeDir(), kid+".md")); err == nil {
 		_ = os.Remove(filepath.Join(knowledgeDir(), kid+".md"))
 	}

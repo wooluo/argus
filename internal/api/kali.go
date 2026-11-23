@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/wooluo/argus/internal/deploy"
 	"github.com/wooluo/argus/internal/store"
 )
@@ -136,14 +137,20 @@ func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	host, _ := in["host"].(string)
-	host = strings.TrimSpace(host)
-	if host == "" {
-		respondErr(w, http.StatusBadRequest, "host 必填")
+	// host 清洗：内嵌端口/全角/零宽统一归一（同部署入口——脏 host 会被
+	// JoinHostPort 拼成 "[1.2.3.4:22]:22" 当域名 lookup 超时）
+	hc, hostPort, herr := deploy.CleanHostPort(host)
+	if herr != nil {
+		respondErr(w, http.StatusBadRequest, herr.Error())
 		return
 	}
+	host = hc
 	port := 22
 	if p, ok := in["port"].(float64); ok && p > 0 && p < 65536 {
 		port = int(p)
+	}
+	if hostPort > 0 {
+		port = hostPort // host 里显式内嵌的端口优先
 	}
 	user, _ := in["username"].(string)
 	if user == "" {
@@ -214,7 +221,7 @@ var (
 // KaliHostMetrics GET /api/kali/hosts/{id}/metrics — SSH 采集 CPU/内存/磁盘/负载
 // （/proc/stat 差分 + /proc/meminfo + df，对齐蓝本 parse_metrics）。
 func (a *API) KaliHostMetrics(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "host_id")
 	for _, h := range a.kaliLoadHosts() {
 		if hid, _ := h["id"].(string); hid != id {
 			continue
@@ -363,7 +370,7 @@ func parseKaliMetrics(raw string) map[string]any {
 // KaliHostActivity GET /api/kali/hosts/{id}/activity — 该主机相关的命令执行审计
 // （agent_logs 中 kali_exec 记录按主机名过滤；节点架构下命令在节点执行，此处聚合平台侧日志）。
 func (a *API) KaliHostActivity(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "host_id")
 	for _, h := range a.kaliLoadHosts() {
 		if hid, _ := h["id"].(string); hid != id {
 			continue
@@ -402,7 +409,7 @@ func (a *API) KaliHostActivity(w http.ResponseWriter, r *http.Request) {
 
 // DeleteKaliHost DELETE /api/kali/hosts/{id} — 过滤后整表保存。
 func (a *API) DeleteKaliHost(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "host_id")
 	hosts := a.kaliLoadHosts()
 	kept := hosts[:0]
 	for _, h := range hosts {

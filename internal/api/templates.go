@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/wooluo/argus/internal/config"
 )
 
@@ -183,7 +184,7 @@ func (a *API) UploadTemplate(w http.ResponseWriter, r *http.Request) {
 
 // GetTemplateContent GET /api/templates/{id}/content — 读模板原文。
 func (a *API) GetTemplateContent(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "template_id")
 	path := filepath.Join(templatesDir(), id+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -195,7 +196,7 @@ func (a *API) GetTemplateContent(w http.ResponseWriter, r *http.Request) {
 
 // DeleteTemplate DELETE /api/templates/{id} — 删除模板（default 不可删）。
 func (a *API) DeleteTemplate(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "template_id")
 	if id == "default" {
 		respondErr(w, http.StatusBadRequest, "默认模板不可删除")
 		return
