@@ -62,6 +62,7 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			pr.Route("/{id}", func(prr chi.Router) {
 				prr.Get("/", a.GetProject)
 				prr.Put("/", a.UpdateProject)
+				prr.Patch("/", a.UpdateProject) // 蓝本（FastAPI patch）与前端 api.js 的部分更新形态
 				prr.Delete("/", a.DeleteProject)
 				prr.Post("/tasks", a.StartTask)
 				prr.Post("/tasks/start", a.StartTask) // 蓝本路径（前端 api.js 调用形态）
