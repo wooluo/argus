@@ -254,9 +254,11 @@ func (a *API) KaliHostMetrics(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		cmd := `echo =CPU1=; grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat; ` +
-			`echo =MEM=; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; ` +
-			`echo =DISK=; df -k / | tail -1`
+		// 标记必须引号包裹：zsh 对 =开头 的词做 =cmd 等号展开，裸 echo =CPU1=
+		// 报 "CPU1= not found" 整行中止 exit 1（Kali 默认 shell 即 zsh）
+		cmd := `echo '=CPU1='; grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat; ` +
+			`echo '=MEM='; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; ` +
+			`echo '=DISK='; df -k / | tail -1`
 		out, err := deploy.RunSSH(host, port, orDefault(user, "kali"), authType, pass, keyPEM, cmd, 25*time.Second)
 		if err != nil {
 			respondJSON(w, http.StatusOK, map[string]any{
