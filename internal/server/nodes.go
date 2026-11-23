@@ -117,12 +117,24 @@ func (n *NodeAPI) DeleteExecNode(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 422, "invalid id")
 		return
 	}
-	// 有在跑任务的节点不允许删（避免任务悬空）
+	// 有在跑任务的节点不允许删（避免任务悬空）；节点已失联（>10min 无
+	// 心跳）则任务是僵尸——代停放行，别让死任务卡死节点管理。
 	var running int
 	_ = n.DB.QueryRow(`SELECT COUNT(*) FROM tasks WHERE node_id=? AND status IN ('pending','running','assigned')`, id).Scan(&running)
+	stoppedZombies := 0
 	if running > 0 {
-		jerr(w, 400, "该节点有待执行/执行中任务，先停任务再删")
-		return
+		var lastSeen string
+		_ = n.DB.QueryRow(`SELECT last_seen FROM nodes WHERE id=?`, id).Scan(&lastSeen)
+		if t, err := time.Parse(time.RFC3339, lastSeen); err == nil && time.Since(t) < 10*time.Minute {
+			// 节点活着 → 照旧拦，但列出任务号——「先停任务」得让人知道停哪条
+			var ids string
+			_ = n.DB.QueryRow(`SELECT GROUP_CONCAT(id) FROM tasks WHERE node_id=? AND status IN ('pending','running','assigned')`, id).Scan(&ids)
+			jerr(w, 400, fmt.Sprintf("该节点有 %d 条待执行/执行中任务（#%s），先停任务再删", running, ids))
+			return
+		}
+		_, _ = n.DB.Exec(`UPDATE tasks SET status='stopped', finished_at=? WHERE node_id=? AND status IN ('pending','running','assigned')`,
+			store.Now(), id)
+		stoppedZombies = running
 	}
 	var nodeName string
 	_ = n.DB.QueryRow(`SELECT name FROM nodes WHERE id=?`, id).Scan(&nodeName)
@@ -140,6 +152,11 @@ func (n *NodeAPI) DeleteExecNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if n.NodeAuth != nil {
 		n.NodeAuth.RemoveByNode(id) // 节点 token 立即失效
+	}
+	if stoppedZombies > 0 {
+		jout(w, 200, map[string]any{"ok": true,
+			"message": fmt.Sprintf("节点已删除；失联期间的 %d 条僵尸任务已代停", stoppedZombies)})
+		return
 	}
 	jout(w, 200, map[string]any{"ok": true})
 }
@@ -819,6 +836,18 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 	if req.Host == "" || req.Username == "" || req.NodeName == "" {
 		jerr(w, 422, "host/username/node_name 必填")
 		return
+	}
+	// host 清洗：内嵌端口/全角/零宽字符入口归一——SSH 拨号、nodes 表展示、
+	// 隧道凭据恢复共用一份干净数据（"1.2.3.4:22" 拆出端口直达 SSH，
+	// 而非被 JoinHostPort 拼成 "[1.2.3.4:22]:22" 当域名 lookup 超时）
+	if h, hp, herr := deploy.CleanHostPort(req.Host); herr != nil {
+		jerr(w, 422, herr.Error())
+		return
+	} else {
+		req.Host = h
+		if hp > 0 {
+			req.Port = hp
+		}
 	}
 	// 默认值
 	if req.Port == 0 {
