@@ -258,7 +258,9 @@ func (a *API) KaliHostMetrics(w http.ResponseWriter, r *http.Request) {
 		// 报 "CPU1= not found" 整行中止 exit 1（Kali 默认 shell 即 zsh）
 		cmd := `echo '=CPU1='; grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat; ` +
 			`echo '=MEM='; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; ` +
-			`echo '=DISK='; df -k / | tail -1`
+			`echo '=DISK='; df -k / | tail -1; ` +
+			`echo '=LOAD='; cat /proc/loadavg; ` +
+			`echo '=TOP='; ps -eo pid,pcpu,pmem,comm --sort=-pcpu | head -8`
 		out, err := deploy.RunSSH(host, port, orDefault(user, "kali"), authType, pass, keyPEM, cmd, 25*time.Second)
 		if err != nil {
 			respondJSON(w, http.StatusOK, map[string]any{
@@ -365,6 +367,39 @@ func parseKaliMetrics(raw string) map[string]any {
 				out["disk_percent"] = float64(int(float64(u)/float64(t)*1000)) / 10
 			}
 		}
+	}
+	// 负载：/proc/loadavg 前三字段（1/5/15 分钟）——UI 负载行 join(" / ")
+	if ls := section("LOAD"); len(ls) > 0 {
+		f := strings.Fields(ls[0])
+		var load []float64
+		for i := 0; i < 3 && i < len(f); i++ {
+			if v, err := strconv.ParseFloat(f[i], 64); err == nil {
+				load = append(load, v)
+			}
+		}
+		if len(load) > 0 {
+			out["load"] = load
+		}
+	}
+	// Top 进程：ps -eo pid,pcpu,pmem,comm --sort=-pcpu（表头行 Atoi 失败自然
+	// 跳过；comm 可含空格，取第 4 列起的余串）——UI Top 进程表
+	procs := []map[string]any{}
+	for _, l := range section("TOP") {
+		parts := strings.Fields(l)
+		if len(parts) < 4 {
+			continue
+		}
+		pid, e1 := strconv.Atoi(parts[0])
+		cpu, e2 := strconv.ParseFloat(parts[1], 64)
+		memP, e3 := strconv.ParseFloat(parts[2], 64)
+		if e1 == nil && e2 == nil && e3 == nil {
+			procs = append(procs, map[string]any{
+				"pid": pid, "name": strings.Join(parts[3:], " "),
+				"cpu": cpu, "mem": memP})
+		}
+	}
+	if len(procs) > 0 {
+		out["top_procs"] = procs
 	}
 	return out
 }
