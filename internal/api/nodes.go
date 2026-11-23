@@ -41,7 +41,7 @@ func nodesMasked(nodes []map[string]any) []map[string]any {
 			m[k] = v
 		}
 		tok, _ := n["token"].(string)
-		m["token"] = kaliMask(tok) // 复用 kali 域 _mask 同款掩码
+		m["token"] = maskSecret(tok)
 		m["has_token"] = tok != ""
 		out = append(out, m)
 	}
@@ -135,4 +135,15 @@ func (a *API) TestNode(w http.ResponseWriter, r *http.Request) {
 		"ok":   resp.StatusCode == http.StatusOK,
 		"info": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)),
 	})
+}
+
+// maskSecret 密钥掩码（<8 位全 *，否则前4...后2）——token/密码展示统一用。
+func maskSecret(v string) string {
+	if v == "" {
+		return ""
+	}
+	if len(v) < 8 {
+		return strings.Repeat("*", len(v))
+	}
+	return v[:4] + "..." + v[len(v)-2:]
 }

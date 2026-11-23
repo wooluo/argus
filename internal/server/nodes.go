@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/wooluo/argus/internal/api"
 	"github.com/wooluo/argus/internal/auth"
 	"github.com/wooluo/argus/internal/config"
 	"github.com/wooluo/argus/internal/deploy"
@@ -60,7 +61,7 @@ func genNodeToken() string {
 
 // ListNodes: GET /api/nodes/ （管理面，UI 用）
 func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
-	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at,host,last_deploy FROM nodes ORDER BY id`)
+	rows, err := n.DB.Query(`SELECT id,name,platform,hostname,version,status,last_seen,created_at,host,last_deploy,ssh_conf FROM nodes ORDER BY id`)
 	if err != nil {
 		jerr(w, 500, err.Error())
 		return
@@ -78,15 +79,18 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 		Host       string `json:"host"`
 		LastDeploy string `json:"last_deploy"` // 最近一次部署结果 JSON（ok/message/steps）
 		Tunnel     bool   `json:"tunnel"`      // SSH 隧道回连是否托管中
+		HasSSH     bool   `json:"has_ssh"`     // SSH 观测凭据（部署写入或详情配置）
+		sshConf    string
 	}
 	out := []nodeRow{}
 	for rows.Next() {
 		var v nodeRow
 		if err := rows.Scan(&v.ID, &v.Name, &v.Platform, &v.Hostname, &v.Version,
-			&v.Status, &v.LastSeen, &v.CreatedAt, &v.Host, &v.LastDeploy); err != nil {
+			&v.Status, &v.LastSeen, &v.CreatedAt, &v.Host, &v.LastDeploy, &v.sshConf); err != nil {
 			jerr(w, 500, err.Error())
 			return
 		}
+		v.HasSSH = v.sshConf != ""
 		// 状态动态化：deploying/deploy_failed 原样；其余按心跳新鲜度判
 		// （心跳周期 15s，45s 容忍）
 		if v.Status != "deploying" && v.Status != "deploy_failed" {
@@ -889,6 +893,14 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 			VALUES(?, '', '', 'deploying', '', ?)
 			ON CONFLICT(name) DO UPDATE SET status='deploying', last_seen='', host=excluded.host, tunnel_ssh=''`,
 			req.NodeName, req.Host)
+	}
+
+	// SSH 观测凭据落库：部署表单的连接信息兼作 ssh_conf（成败都写——部署
+	// 失败凭据依然有效，节点详情页的监控/测试照常可用）
+	if sc, merr := json.Marshal(api.SSHConf{Host: req.Host, Port: req.Port,
+		Username: req.Username, AuthType: req.AuthType,
+		Password: req.Password, PrivateKey: req.PrivateKey}); merr == nil {
+		_, _ = n.DB.Exec(`UPDATE nodes SET ssh_conf=? WHERE name=?`, string(sc), req.NodeName)
 	}
 
 	// 异步部署（分步推送进度；panic/整体超时兜底——goroutine 卡死会让

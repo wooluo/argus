@@ -185,14 +185,6 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		// SSH 引导式节点部署（管理面；节点网 register/heartbeat 在下方独立鉴权域）
 		apig.Post("/api/nodes/deploy", nodeAPI.DeployNode)
 
-		// Kali 域（蓝本 api/kali.py）
-		apig.Get("/api/kali/hosts", a.ListKaliHosts)
-		apig.Put("/api/kali/hosts", a.PutKaliHosts)
-		apig.Post("/api/kali/hosts/test", a.TestKaliHost)
-		apig.Get("/api/kali/hosts/{host_id}/metrics", a.KaliHostMetrics)
-		apig.Get("/api/kali/hosts/{host_id}/activity", a.KaliHostActivity)
-		apig.Delete("/api/kali/hosts/{host_id}", a.DeleteKaliHost)
-
 		// Nodes 域（dnslog 节点 CRUD；/api/nodes 的节点网 register/heartbeat 已在下方独立挂载，
 		// 与蓝本前缀冲突，故 dnslog 配置面挂 /api/nodes 下的 GET/PUT/test）
 		apig.Get("/api/nodes", a.ListNodes)
@@ -200,6 +192,11 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Post("/api/nodes/test", a.TestNode)
 		// 执行节点管理（删除残留行；编辑=前端带出信息重新走部署弹窗）
 		apig.Delete("/api/nodes/exec/{id}", nodeAPI.DeleteExecNode)
+		// 节点 SSH 观测（原「渗透测试主机」域并入）：凭据 / 测试 / 监控 / 活动
+		apig.Put("/api/nodes/exec/{id}/ssh", a.PutNodeSSH)
+		apig.Post("/api/nodes/exec/{id}/ssh-test", a.TestNodeSSH)
+		apig.Get("/api/nodes/exec/{id}/metrics", a.NodeMetrics)
+		apig.Get("/api/nodes/exec/{id}/activity", a.NodeActivity)
 
 		// ScopeSentry 域（蓝本 api/scopesentry.py）
 		apig.Get("/api/scopesentry/config", a.GetScopeSentryConfig)

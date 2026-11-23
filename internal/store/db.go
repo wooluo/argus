@@ -4,9 +4,11 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -26,7 +28,83 @@ func Open(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	migrateKaliHosts(db)
 	return db, nil
+}
+
+// migrateKaliHosts 一次性迁移：settings['kali_hosts']（渗透测试主机池，Python
+// 蓝本遗留）并入 nodes 表——节点成为唯一主机档案，SSH 观测凭据落 ssh_conf
+// 列。按 host 匹配现有节点合并凭据，无匹配则新增 offline 节点行；原值备份
+// 到 kali_hosts_backup_v1 后清空，kali_merged_v1 标记防重跑（失败静默——
+// 下次启动重试，迁移失败不阻塞启动）。
+func migrateKaliHosts(db *sql.DB) {
+	if GetSetting(db, "kali_merged_v1") != "" {
+		return
+	}
+	raw := GetSetting(db, "kali_hosts")
+	if raw == "" {
+		SetSetting(db, "kali_merged_v1", Now())
+		return
+	}
+	var hosts []map[string]any
+	if err := json.Unmarshal([]byte(raw), &hosts); err != nil || len(hosts) == 0 {
+		SetSetting(db, "kali_merged_v1", Now()) // 非法/空——标记完成防反复尝试
+		return
+	}
+	for _, h := range hosts {
+		host, _ := h["host"].(string)
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		// ssh_conf 只收服务端真实消费的字段；sudo_password/proxy/enabled/
+		// primary 从未被 Go 侧读过，迁移即退役
+		conf := map[string]any{"host": host, "port": 22, "username": "kali", "auth_type": "password"}
+		if p, ok := h["port"].(float64); ok && p > 0 && p < 65536 {
+			conf["port"] = int(p)
+		}
+		if u, ok := h["username"].(string); ok && u != "" {
+			conf["username"] = u
+		}
+		if at, ok := h["auth_type"].(string); ok && (at == "password" || at == "key") {
+			conf["auth_type"] = at
+		}
+		if pw, ok := h["password"].(string); ok && pw != "" {
+			conf["password"] = pw
+		}
+		// private_key_path 是 server 本地路径——尽力读入内容（读不到丢弃）
+		if kp, ok := h["private_key_path"].(string); ok && kp != "" {
+			if b, err := os.ReadFile(kp); err == nil {
+				conf["private_key"] = string(b)
+			}
+		}
+		b, _ := json.Marshal(conf)
+		var id int64
+		err := db.QueryRow(`SELECT id FROM nodes WHERE host=? ORDER BY id LIMIT 1`, host).Scan(&id)
+		if err == nil {
+			_, _ = db.Exec(`UPDATE nodes SET ssh_conf=? WHERE id=?`, string(b), id)
+			continue
+		}
+		// 无匹配 → 新增 offline 节点行；name 取条目名，为空/撞名回退 host
+		name, _ := h["name"].(string)
+		if name == "" {
+			name = host
+		}
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE name=?`, name).Scan(&n)
+		if n > 0 {
+			name = host
+			_ = db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE name=?`, name).Scan(&n)
+			if n > 0 {
+				name = fmt.Sprintf("%s-%s", host, Now())
+			}
+		}
+		_, _ = db.Exec(`INSERT INTO nodes(name,token,platform,status,last_seen,host,ssh_conf)
+			VALUES(?, '', '', 'offline', '', ?, ?)`, name, host, string(b))
+	}
+	SetSetting(db, "kali_hosts_backup_v1", raw)
+	SetSetting(db, "kali_hosts", "")
+	SetSetting(db, "kali_merged_v1", Now())
 }
 
 func migrate(db *sql.DB) error {
@@ -47,6 +125,7 @@ var alters = []string{
 	`ALTER TABLE nodes ADD COLUMN host TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN last_deploy TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN tunnel_ssh TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE nodes ADD COLUMN ssh_conf TEXT NOT NULL DEFAULT ''`,
 }
 
 var migrations = []string{

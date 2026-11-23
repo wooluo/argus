@@ -13,165 +13,152 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/wooluo/argus/internal/deploy"
-	"github.com/wooluo/argus/internal/store"
 )
 
-// ============ Kali 主机池域（蓝本 api/kali.py）：多主机管理 / 测试 / 监控 / 活动 ============
-// 与蓝本差异：Go 侧暂无 SSH 层——hosts/test 仅测 host:port TCP 连通（蓝本走真实 SSH 登录验证）；
-// metrics/activity 蓝本经 SSH 采集，Go 降级为存根（TODO：接入 SSH 客户端后实现真实采集）。
+// ============ 节点 SSH 观测域 ============
+// 原「渗透测试主机」（settings.kali_hosts，Python 蓝本遗留）已并入执行节点：
+// 节点表是唯一主机档案，nodes.ssh_conf 列存观测凭据（部署自动写入，也可
+// 单独配置）。连通测试 / 资源监控 / 活动审计一律按节点 id 操作。
 
-const kaliHostsKey = "kali_hosts"
-
-// kaliLoadHosts 读 settings["kali_hosts"]（蓝本 kali.hosts()）。
-func (a *API) kaliLoadHosts() []map[string]any {
-	var hosts []map[string]any
-	_ = json.Unmarshal([]byte(store.GetSetting(a.DB, kaliHostsKey)), &hosts)
-	return hosts
+// SSHConf 节点 SSH 观测凭据（nodes.ssh_conf 列的 JSON 形状）。
+// deploy.SSHConfig 的观测子集——只收服务端真实消费的字段，与 tunnel_ssh
+// （部署/隧道语义，直连部署会清空）分离，直连节点也能挂观测。
+type SSHConf struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	AuthType   string `json:"auth_type"` // password | key
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"private_key,omitempty"` // PEM
 }
 
-// kaliSaveHosts 落 settings["kali_hosts"]（蓝本 kali.save_hosts()）。
-func (a *API) kaliSaveHosts(hosts []map[string]any) error {
-	b, err := json.Marshal(hosts)
-	if err != nil {
-		return err
+// nodeSSH 取节点的观测凭据（ssh_conf 为空/解析失败时 ok=false）。
+func (a *API) nodeSSH(id int64) (SSHConf, string, bool) {
+	var conf SSHConf
+	var raw, name, host string
+	err := a.DB.QueryRow(`SELECT name, host, ssh_conf FROM nodes WHERE id=?`, id).Scan(&name, &host, &raw)
+	if err != nil || raw == "" {
+		return conf, name, false
 	}
-	return store.SetSetting(a.DB, kaliHostsKey, string(b))
+	if err := json.Unmarshal([]byte(raw), &conf); err != nil {
+		return SSHConf{}, name, false
+	}
+	if conf.Host == "" {
+		conf.Host = host
+	}
+	return conf, name, true
 }
 
-// kaliMask 掩码（蓝本 _mask：<8 位全 *，否则前4...后2）。
-func kaliMask(v string) string {
-	if v == "" {
-		return ""
+// PutNodeSSH PUT /api/nodes/exec/{id}/ssh — 设置/更新节点 SSH 观测凭据。
+// 密码/私钥留空（或掩码回传）= 保留旧值；host 缺省用节点已存地址；
+// 顺手把规范化的 host 回写 nodes.host。
+func (a *API) PutNodeSSH(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondErr(w, http.StatusBadRequest, "invalid id")
+		return
 	}
-	if len(v) < 8 {
-		return strings.Repeat("*", len(v))
+	var in struct {
+		Host           string `json:"host"`
+		Port           int    `json:"port"`
+		Username       string `json:"username"`
+		AuthType       string `json:"auth_type"`
+		Password       string `json:"password"`
+		PrivateKey     string `json:"private_key"`
+		PrivateKeyPath string `json:"private_key_path"` // server 本地路径（可选，读取后落库）
 	}
-	return v[:4] + "..." + v[len(v)-2:]
-}
-
-// kaliIsMasked 空 / 含 "..." / 全 * —— 视为掩码回传，PUT 时保留旧值。
-func kaliIsMasked(v string) bool {
-	return v == "" || strings.Contains(v, "...") || strings.Trim(v, "*") == ""
-}
-
-// kaliMaskedConf 掩码单条主机配置（蓝本 _mask_conf），只回掩码 + has_xxx，绝不回明文。
-func kaliMaskedConf(h map[string]any) map[string]any {
-	out := map[string]any{}
-	for k, v := range h {
-		if k == "password" || k == "sudo_password" {
-			continue
-		}
-		out[k] = v
-	}
-	for _, k := range []string{"password", "sudo_password"} {
-		val, _ := h[k].(string)
-		out[k] = kaliMask(val)
-		out["has_"+k] = val != ""
-	}
-	return out
-}
-
-// ListKaliHosts GET /api/kali/hosts — 列表（密码掩码）。
-func (a *API) ListKaliHosts(w http.ResponseWriter, r *http.Request) {
-	hosts := a.kaliLoadHosts()
-	out := make([]map[string]any, 0, len(hosts))
-	for _, h := range hosts {
-		out = append(out, kaliMaskedConf(h))
-	}
-	respondJSON(w, http.StatusOK, out)
-}
-
-// PutKaliHosts PUT /api/kali/hosts — 整表保存；password/sudo_password 空/掩码回传时按 id 保留旧值。
-func (a *API) PutKaliHosts(w http.ResponseWriter, r *http.Request) {
-	var in []map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		respondErr(w, http.StatusBadRequest, "参数错误")
 		return
 	}
-	old := map[string]map[string]any{}
-	for _, h := range a.kaliLoadHosts() {
-		if id, ok := h["id"].(string); ok {
-			old[id] = h
-		}
-	}
-	for _, h := range in {
-		id, _ := h["id"].(string)
-		if id == "" {
-			id = fmt.Sprintf("h%d", time.Now().UnixNano()) // 新主机补 id
-			h["id"] = id
-		}
-		for _, key := range []string{"password", "sudo_password"} {
-			val, _ := h[key].(string)
-			if kaliIsMasked(val) {
-				if o := old[id]; o != nil {
-					h[key] = o[key] // 掩码回传 → 保留旧值
-				} else {
-					h[key] = ""
-				}
-			}
-		}
-	}
-	if err := a.kaliSaveHosts(in); err != nil {
-		respondErr(w, http.StatusInternalServerError, err.Error())
+	var nodeHost, oldRaw string
+	if err := a.DB.QueryRow(`SELECT host, ssh_conf FROM nodes WHERE id=?`, id).Scan(&nodeHost, &oldRaw); err != nil {
+		respondErr(w, http.StatusNotFound, "节点不存在")
 		return
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
+	var old SSHConf
+	_ = json.Unmarshal([]byte(oldRaw), &old)
 
-// TestKaliHost POST /api/kali/hosts/test — 单台测试（无需先保存；掩码密码自动取已存值）。
-// 蓝本对齐：真实 SSH 登录验证（执行 echo）；密钥路径为空 = 免密默认密钥。
-func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
-	var in map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		respondErr(w, http.StatusBadRequest, "参数错误")
-		return
+	host := in.Host
+	if host == "" {
+		host = nodeHost
 	}
-	id, _ := in["id"].(string)
-	if v, _ := in["password"].(string); kaliIsMasked(v) || v == "" {
-		for _, h := range a.kaliLoadHosts() {
-			if hid, _ := h["id"].(string); hid == id && id != "" {
-				in["password"] = h["password"]
-				in["sudo_password"] = h["sudo_password"]
-				break
-			}
-		}
+	if host == "" {
+		host = old.Host
 	}
-	host, _ := in["host"].(string)
-	// host 清洗：内嵌端口/全角/零宽统一归一（同部署入口——脏 host 会被
-	// JoinHostPort 拼成 "[1.2.3.4:22]:22" 当域名 lookup 超时）
-	hc, hostPort, herr := deploy.CleanHostPort(host)
+	hc, hp, herr := deploy.CleanHostPort(host)
 	if herr != nil {
 		respondErr(w, http.StatusBadRequest, herr.Error())
 		return
 	}
-	host = hc
-	port := 22
-	if p, ok := in["port"].(float64); ok && p > 0 && p < 65536 {
-		port = int(p)
+	conf := SSHConf{Host: hc, Username: in.Username, AuthType: in.AuthType,
+		Password: in.Password, PrivateKey: in.PrivateKey}
+	if conf.Username == "" {
+		conf.Username = orDefault(old.Username, "kali")
 	}
-	if hostPort > 0 {
-		port = hostPort // host 里显式内嵌的端口优先
+	if conf.AuthType == "" {
+		conf.AuthType = orDefault(old.AuthType, "password")
 	}
-	user, _ := in["username"].(string)
-	if user == "" {
-		user = "kali"
+	port := in.Port
+	if port == 0 {
+		port = old.Port
 	}
-	authType, _ := in["auth_type"].(string)
-	pass, _ := in["password"].(string)
-	keyPEM := ""
-	if authType == "key" {
-		if p, _ := in["private_key_path"].(string); p != "" {
-			if b, err := os.ReadFile(p); err == nil {
-				keyPEM = string(b)
-			}
+	if hp > 0 {
+		port = hp // host 里显式内嵌的端口优先
+	}
+	if port == 0 {
+		port = 22
+	}
+	conf.Port = port
+	// 密码留空/掩码回传 → 保留旧值（前端不回传明文）
+	if conf.Password == "" || strings.Contains(conf.Password, "...") {
+		conf.Password = old.Password
+	}
+	if conf.PrivateKey == "" && in.PrivateKeyPath != "" {
+		if b, rerr := os.ReadFile(in.PrivateKeyPath); rerr == nil {
+			conf.PrivateKey = string(b)
 		}
+	}
+	if conf.PrivateKey == "" {
+		conf.PrivateKey = old.PrivateKey
+	}
+	switch {
+	case conf.AuthType == "key" && conf.PrivateKey == "":
+		respondErr(w, http.StatusBadRequest, "密钥认证需要提供私钥")
+		return
+	case conf.AuthType == "password" && conf.Password == "":
+		respondErr(w, http.StatusBadRequest, "密码不能为空")
+		return
+	}
+	b, _ := json.Marshal(conf)
+	if _, err := a.DB.Exec(`UPDATE nodes SET ssh_conf=?, host=? WHERE id=?`, string(b), hc, id); err != nil {
+		respondErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"ok": true,
+		"message": fmt.Sprintf("SSH 凭据已保存: %s@%s:%d", conf.Username, hc, port)})
+}
+
+// TestNodeSSH POST /api/nodes/exec/{id}/ssh-test — 用节点已存凭据做真实 SSH
+// 登录验证（执行 echo）。蓝本对齐：密钥路径为空 = 免密默认密钥。
+func (a *API) TestNodeSSH(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	conf, _, ok := a.nodeSSH(id)
+	if !ok {
+		respondJSON(w, http.StatusOK, map[string]any{"ok": false,
+			"error": "节点未配置 SSH 凭据（详情里配置，或重新部署时自动写入）"})
+		return
 	}
 	// echo 重试 3 次：该类 VPS 存在 x/crypto SSH 输出间歇丢失（命令成功
 	// 但 stdout 被吞，err=<nil> 且无 SSH_OK）——任一次拿到标记即算通。
 	var out string
-	var err error
 	for i := 0; i < 3; i++ {
-		out, err = deploy.RunSSH(host, port, user, authType, pass, keyPEM, "echo SSH_OK", 10*time.Second)
+		out, err = deploy.RunSSH(conf.Host, conf.Port, conf.Username, conf.AuthType,
+			conf.Password, conf.PrivateKey, "echo SSH_OK", 10*time.Second)
 		if strings.Contains(out, "SSH_OK") {
 			err = nil
 			break
@@ -186,13 +173,14 @@ func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
 			// TCP+认证已过、命令成功但输出被吞——按可用处理并如实标注
 			respondJSON(w, http.StatusOK, map[string]any{
 				"ok":   true,
-				"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d；远端输出被吞无法回显，该机已知 SSH 库输出丢失问题）", user, host, port),
+				"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d；远端输出被吞无法回显，该机已知 SSH 库输出丢失问题）",
+					conf.Username, conf.Host, conf.Port),
 			})
 			return
 		}
 		// SSH 失败给出 TCP 兜底诊断（区分网络不通 vs 认证失败）
-		msg := fmt.Sprintf("SSH 登录失败: %v（host=%q user=%q）", err, host, user)
-		addr := net.JoinHostPort(host, strconv.Itoa(port))
+		msg := fmt.Sprintf("SSH 登录失败: %v（host=%q user=%q）", err, conf.Host, conf.Username)
+		addr := net.JoinHostPort(conf.Host, strconv.Itoa(conf.Port))
 		if conn, derr := net.DialTimeout("tcp", addr, 5*time.Second); derr == nil {
 			_ = conn.Close()
 			msg += fmt.Sprintf("（TCP %s 可达，多为认证失败：检查用户名/密码/密钥）", addr)
@@ -204,12 +192,11 @@ func (a *API) TestKaliHost(w http.ResponseWriter, r *http.Request) {
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
 		"ok":   true,
-		"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d）", user, host, port),
+		"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d）", conf.Username, conf.Host, conf.Port),
 	})
 }
 
-// metricsCache 指标缓存节流（蓝本 collect_metrics max_age：公网 VPS 的 SSH
-// 握手可达 20s+，节点页轮询每次新建连接会拖垮——15s 内直接返回缓存）。
+// metricsCache 资源监控 15s 缓存（键=节点 id 字符串；探测一次 SSH 成本不低）。
 var (
 	metricsMu    sync.Mutex
 	metricsCache = map[string]struct {
@@ -218,70 +205,60 @@ var (
 	}{}
 )
 
-// KaliHostMetrics GET /api/kali/hosts/{id}/metrics — SSH 采集 CPU/内存/磁盘/负载
-// （/proc/stat 差分 + /proc/meminfo + df，对齐蓝本 parse_metrics）。
-func (a *API) KaliHostMetrics(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "host_id")
-	for _, h := range a.kaliLoadHosts() {
-		if hid, _ := h["id"].(string); hid != id {
-			continue
-		}
-		name, _ := h["name"].(string)
-		host := strings.TrimSpace(strValue(h["host"]))
-		now := time.Now().UTC().Format(time.RFC3339)
-		metricsMu.Lock()
-		if c, ok := metricsCache[id]; ok && time.Since(c.at) < 15*time.Second {
-			m := c.m
-			metricsMu.Unlock()
-			m["time"] = now
-			respondJSON(w, http.StatusOK, m)
-			return
-		}
+// NodeMetrics GET /api/nodes/exec/{id}/metrics — SSH 采集 CPU/内存/磁盘/负载/
+// Top 进程（/proc/stat 差分 + /proc/meminfo + df + loadavg + ps，对齐蓝本
+// parse_metrics）。
+func (a *API) NodeMetrics(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	conf, name, ok := a.nodeSSH(id)
+	key := strconv.FormatInt(id, 10)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if !ok {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"connected": false, "host": name,
+			"error": "节点未配置 SSH 凭据", "time": now})
+		return
+	}
+	metricsMu.Lock()
+	if c, cached := metricsCache[key]; cached && time.Since(c.at) < 15*time.Second {
+		m := c.m
 		metricsMu.Unlock()
-
-		port := 22
-		if p, ok := h["port"].(float64); ok && p > 0 {
-			port = int(p)
-		}
-		user, _ := h["username"].(string)
-		authType, _ := h["auth_type"].(string)
-		pass, _ := h["password"].(string)
-		keyPEM := ""
-		if authType == "key" {
-			if p, _ := h["private_key_path"].(string); p != "" {
-				if b, err := os.ReadFile(p); err == nil {
-					keyPEM = string(b)
-				}
-			}
-		}
-		// 标记必须引号包裹：zsh 对 =开头 的词做 =cmd 等号展开，裸 echo =CPU1=
-		// 报 "CPU1= not found" 整行中止 exit 1（Kali 默认 shell 即 zsh）
-		cmd := `echo '=CPU1='; grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat; ` +
-			`echo '=MEM='; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; ` +
-			`echo '=DISK='; df -k / | tail -1; ` +
-			`echo '=LOAD='; cat /proc/loadavg; ` +
-			`echo '=TOP='; ps -eo pid,pcpu,pmem,comm --sort=-pcpu | head -8`
-		out, err := deploy.RunSSH(host, port, orDefault(user, "kali"), authType, pass, keyPEM, cmd, 25*time.Second)
-		if err != nil {
-			respondJSON(w, http.StatusOK, map[string]any{
-				"connected": false, "host": orDefault(name, host),
-				"error": err.Error(), "time": now})
-			return
-		}
-		m := parseKaliMetrics(out)
-		m["connected"] = true
-		m["host"] = orDefault(name, host)
 		m["time"] = now
-		metricsMu.Lock()
-		metricsCache[id] = struct {
-			at time.Time
-			m  map[string]any
-		}{time.Now(), m}
-		metricsMu.Unlock()
 		respondJSON(w, http.StatusOK, m)
 		return
 	}
-	respondErr(w, http.StatusNotFound, "主机不存在")
+	metricsMu.Unlock()
+
+	// 标记必须引号包裹：zsh 对 =开头 的词做 =cmd 等号展开，裸 echo =CPU1=
+	// 报 "CPU1= not found" 整行中止 exit 1（Kali 默认 shell 即 zsh）
+	cmd := `echo '=CPU1='; grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat; ` +
+		`echo '=MEM='; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; ` +
+		`echo '=DISK='; df -k / | tail -1; ` +
+		`echo '=LOAD='; cat /proc/loadavg; ` +
+		`echo '=TOP='; ps -eo pid,pcpu,pmem,comm --sort=-pcpu | head -8`
+	out, err := deploy.RunSSH(conf.Host, conf.Port, conf.Username, conf.AuthType,
+		conf.Password, conf.PrivateKey, cmd, 25*time.Second)
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"connected": false, "host": orDefault(name, conf.Host),
+			"error": err.Error(), "time": now})
+		return
+	}
+	m := parseKaliMetrics(out)
+	m["connected"] = true
+	m["host"] = orDefault(name, conf.Host)
+	m["time"] = now
+	metricsMu.Lock()
+	metricsCache[key] = struct {
+		at time.Time
+		m  map[string]any
+	}{time.Now(), m}
+	metricsMu.Unlock()
+	respondJSON(w, http.StatusOK, m)
 }
 
 // parseKaliMetrics 解析 =SECTION= 分节的采集输出（对齐蓝本 parse_metrics）。
@@ -404,65 +381,51 @@ func parseKaliMetrics(raw string) map[string]any {
 	return out
 }
 
-// KaliHostActivity GET /api/kali/hosts/{id}/activity — 该主机相关的命令执行审计
-// （agent_logs 中 kali_exec 记录按主机名过滤；节点架构下命令在节点执行，此处聚合平台侧日志）。
-func (a *API) KaliHostActivity(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "host_id")
-	for _, h := range a.kaliLoadHosts() {
-		if hid, _ := h["id"].(string); hid != id {
-			continue
-		}
-		host := strings.TrimSpace(strValue(h["host"]))
-		rows, err := a.DB.Query(
-			`SELECT tool,content,created_at FROM agent_logs
-			 WHERE tool IN ('kali_exec','run_script','kali_install')
-			 ORDER BY id DESC LIMIT 200`)
-		if err != nil {
-			respondJSON(w, http.StatusOK, map[string]any{"items": []any{}})
-			return
-		}
-		defer rows.Close()
-		items := []map[string]any{}
-		for rows.Next() {
-			var tool, content, createdAt string
-			if rows.Scan(&tool, &content, &createdAt) != nil {
-				continue
-			}
-			// 平台侧日志未按主机分表——内容含主机名的即视为该主机活动
-			if host != "" && !strings.Contains(content, host) {
-				continue
-			}
-			items = append(items, map[string]any{
-				"tool": tool, "cmd": truncate(content, 300), "time": createdAt})
-			if len(items) >= 50 {
-				break
-			}
-		}
-		respondJSON(w, http.StatusOK, map[string]any{"items": items})
+// NodeActivity GET /api/nodes/exec/{id}/activity — 该主机相关的命令执行审计
+// （agent_logs 中 kali_exec/run_script/kali_install 记录；按节点 host 字符串
+// 过滤 content——蓝本同款弱匹配，节点名仅作 host 缺失时回退）。
+func (a *API) NodeActivity(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	respondErr(w, http.StatusNotFound, "主机不存在")
-}
-
-// DeleteKaliHost DELETE /api/kali/hosts/{id} — 过滤后整表保存。
-func (a *API) DeleteKaliHost(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "host_id")
-	hosts := a.kaliLoadHosts()
-	kept := hosts[:0]
-	for _, h := range hosts {
-		if hid, _ := h["id"].(string); hid != id {
-			kept = append(kept, h)
-		}
+	var name, host string
+	if err := a.DB.QueryRow(`SELECT name, host FROM nodes WHERE id=?`, id).Scan(&name, &host); err != nil {
+		respondErr(w, http.StatusNotFound, "节点不存在")
+		return
 	}
-	if err := a.kaliSaveHosts(kept); err != nil {
+	match := host
+	if match == "" {
+		match = name
+	}
+	rows, err := a.DB.Query(
+		`SELECT tool,content,created_at FROM agent_logs
+		 WHERE tool IN ('kali_exec','run_script','kali_install')
+		 ORDER BY id DESC LIMIT 200`)
+	if err != nil {
 		respondErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// strValue map 取 string（清洗隐藏字符用）。
-func strValue(v any) string {
-	s, _ := v.(string)
-	return s
+	defer rows.Close()
+	type act struct {
+		Tool string `json:"tool"`
+		Cmd  string `json:"cmd"`
+		Time string `json:"time"`
+	}
+	items := []act{}
+	for rows.Next() {
+		var tool, content, at string
+		if err := rows.Scan(&tool, &content, &at); err != nil {
+			break
+		}
+		if match != "" && !strings.Contains(content, match) {
+			continue
+		}
+		items = append(items, act{Tool: tool, Cmd: truncateStr(content, 300), Time: at})
+		if len(items) >= 50 {
+			break
+		}
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"items": items})
 }
