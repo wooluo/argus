@@ -142,6 +142,10 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 		apig.Get("/api/settings/llm/models", a.LLMModels)
 		apig.Get("/api/settings/llm/preset-keys", a.GetPresetKeys)
 		apig.Put("/api/settings/llm/preset-keys", a.PutPresetKey)
+		// 模型池与角色分工（分层用脑）
+		apig.Get("/api/settings/models", a.GetModels)
+		apig.Put("/api/settings/models", a.PutModels)
+		apig.Post("/api/settings/models/test", a.TestModel)
 		apig.Get("/api/settings/fofa", a.GetFofaConfig)
 		apig.Put("/api/settings/fofa", a.PutFofaConfig)
 		apig.Get("/api/tools", a.ToolsStatus)
@@ -233,6 +237,8 @@ func NewRouter(a *api.API, bus *events.Bus, am *auth.Middleware, nodeAuth *auth.
 			ng.Get("/approvals/{id}", nodeAPI.GetApproval)
 			// 运行中情报：节点轮询拉取操作员提交的情报
 			ng.Get("/intel", nodeAPI.NodeIntel)
+			// 知识条目全文：任务书只带索引，节点按需拉取
+			ng.Get("/knowledge/{kid}", nodeAPI.NodeKnowledge)
 		})
 	})
 

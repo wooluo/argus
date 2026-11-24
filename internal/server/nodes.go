@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -32,6 +33,7 @@ type NodeAPI struct {
 	NodeAuth *auth.NodeAuth
 	Admin    *auth.Middleware // 管理鉴权（SSH 部署时下发的注册凭证 = 当前管理 token）
 	Tunnels  *TunnelManager   // SSH 隧道回连管理（NAT/内网 server 的节点回连通道）
+	Watchdog *Watchdog        // 任务看门狗（执行心跳在 NodeIntel 采集；nil=不启用）
 }
 
 // eventsBus: server 包内事件发布接口（events.Bus 实现）。
@@ -242,8 +244,10 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, err.Error())
 		return
 	}
-	res, err := n.DB.Exec(`UPDATE tasks SET status='assigned',node_id=?,assigned_at=? WHERE id=? AND status IN ('pending','running')`,
-		node.ID, store.Now(), taskID)
+	// started_at 记首次领取时刻（重排/重跑不改写，耗时统计按首次起算）
+	res, err := n.DB.Exec(`UPDATE tasks SET status='assigned',node_id=?,assigned_at=?,
+		started_at=COALESCE(started_at,?) WHERE id=? AND status IN ('pending','running')`,
+		node.ID, store.Now(), store.Now(), taskID)
 	if err != nil || rowsAffected(res) == 0 {
 		jout(w, 200, map[string]any{"task": nil})
 		return
@@ -266,8 +270,10 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		Scan(&p.ID, &p.Name, &p.Description, &p.Scope, &p.Authorized, &p.AllowHosts, &p.CreatedAt)
 	_ = n.DB.QueryRow(`SELECT value FROM settings WHERE key='llm'`).Scan(&llmCfg)
 
-	// 知识注入：项目已有知识库条目随任务下发（node 侧拼入任务书，跨任务经验复用）
-	knowledgeBlock := n.buildKnowledgeBlock()
+	// 知识索引（推索引、拉全文）：本项目专属条目优先，其后是与「项目名 / 授权
+	// 范围 / 项目说明」最相关的通用条目；全文由节点经 knowledge_get 按需拉取。
+	//（原先按文件名顺序取前 5 条整篇塞进任务书：与目标无关、条目一多就撑爆）
+	knowledgeBlock := api.KnowledgeIndexMarkdown(n.DB, int64(t.ProjectID), knowledgeQuery(p), 10)
 
 	// HITL 审批名单下发（节点 agent 执行前拦截；空数组=无审批）
 	var approvalsRequire []string
@@ -315,13 +321,52 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		continueSummary = n.buildContinueSummary(contFrom)
 	}
 
+	// 时间预算：剩余时长自首次领取起算（重排 / 重跑不重置），节点据此在任务书里
+	// 写明并临近结束时提醒收敛；到点由看门狗代停（同一个上限，两处读同一份设置）
+	remaining, limit := int64(0), int64(0)
+	if max := taskTimeLimit(n.DB); max > 0 {
+		var started string
+		_ = n.DB.QueryRow(`SELECT COALESCE(started_at, assigned_at, '') FROM tasks WHERE id=?`, taskID).
+			Scan(&started)
+		limit = int64(max.Seconds())
+		if t, err := time.Parse("2006-01-02T15:04:05.000Z", started); err == nil {
+			if left := time.Until(t.Add(max)); left > 0 {
+				remaining = int64(left.Seconds())
+			}
+		}
+	}
+
+	// 分层用脑：按角色下发模型配置（主循环 / 审查核验 / 报告复盘）。没分工的
+	// 角色不下发，节点沿用主配置。
+	models := map[string]any{}
+	for _, def := range api.ModelRoles {
+		if cfg := api.ResolveModel(n.DB, def.ID); cfg != nil {
+			models[def.ID] = *cfg
+		}
+	}
+
 	jout(w, 200, map[string]any{"task": t, "project": p, "llm": json.RawMessage(llmCfg),
 		"knowledge": knowledgeBlock, "approvals_require": approvalsRequire,
 		"intel": intel, "skills": skillsBlock, "mcp": mcpServers,
 		"agent":            map[string]any{"prompt": agentPrompt, "max_steps": agentMaxSteps},
 		"fofa":             map[string]any{"email": fofaEmail, "key": fofaKey},
 		"github_token":     store.GetSetting(n.DB, "github_token"),
-		"continue_summary": continueSummary})
+		"continue_summary": continueSummary,
+		"verify_findings":  limitBool(n.DB, "autonomous_verify", true), // 收工后独立核验
+		"time_budget": map[string]any{
+			"remaining_seconds": remaining, "limit_seconds": limit},
+		"models": models,
+	})
+}
+
+// limitBool 读 settings.limits 里的布尔项（缺省取 def）。
+func limitBool(db *sql.DB, key string, def bool) bool {
+	var limits map[string]any
+	_ = json.Unmarshal([]byte(store.GetSetting(db, "limits")), &limits)
+	if v, ok := limits[key].(bool); ok {
+		return v
+	}
+	return def
 }
 
 // mcpServer Poll 下发给节点的 MCP 服务器配置（节点侧 mcp.go 反序列化）。
@@ -467,59 +512,40 @@ func (n *NodeAPI) NodeIntel(w http.ResponseWriter, r *http.Request) {
 	if n.DB.QueryRow(`SELECT status FROM tasks WHERE id=?`, taskID).Scan(&st) == nil {
 		stopped = st == "stopped"
 	}
+	if n.Watchdog != nil {
+		n.Watchdog.Touch(taskID, time.Now()) // 执行心跳：看门狗据此区分「节点在线但任务没人跑」
+	}
 	jout(w, 200, map[string]any{"intel": intel.Drain(taskID), "stopped": stopped})
 }
 
-// buildKnowledgeBlock 启用状态的知识条目（≤5 条 × 截断），注入任务书（蓝本 _knowledge_block）。
-func (n *NodeAPI) buildKnowledgeBlock() string {
-	dir := filepath.Join(config.Load().DataDir, "knowledge")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
+// knowledgeQuery 知识索引的相关性查询：项目名 + 授权范围 + 项目说明。
+func knowledgeQuery(p store.Project) string {
+	var rules []struct {
+		Value string `json:"value"`
 	}
-	var meta []map[string]any
-	_ = json.Unmarshal([]byte(store.GetSetting(n.DB, "knowledge")), &meta)
-	enabled := map[string]bool{}
-	titles := map[string]string{}
-	for _, m := range meta {
-		id, _ := m["id"].(string)
-		title, _ := m["title"].(string)
-		if id != "" {
-			titles[id] = title
-			if on, ok := m["enabled"].(bool); !ok || on {
-				enabled[id] = true
-			}
-		}
+	_ = json.Unmarshal(p.Scope, &rules)
+	values := make([]string, len(rules))
+	for i, r := range rules {
+		values[i] = r.Value
 	}
-	var parts []string
-	count := 0
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".md") || count >= 5 {
-			continue
-		}
-		id := strings.TrimSuffix(e.Name(), ".md")
-		if !enabled[id] {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		title := titles[id]
-		if title == "" {
-			title = id
-		}
-		content := string(b)
-		if len(content) > 1500 {
-			content = content[:1500]
-		}
-		parts = append(parts, fmt.Sprintf("### %s\n%s", title, content))
-		count++
+	return p.Name + " " + strings.Join(values, " ") + " " + p.Description
+}
+
+// NodeKnowledge: GET /api/nodes/knowledge/{kid}?task_id= — 节点按需拉取知识条目
+// 全文（任务书只带索引）。只放行对该任务所属项目可见且启用的条目。
+func (n *NodeAPI) NodeKnowledge(w http.ResponseWriter, r *http.Request) {
+	kid := chi.URLParam(r, "kid")
+	taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64)
+	var projectID int64
+	if taskID > 0 {
+		_ = n.DB.QueryRow(`SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID)
 	}
-	if len(parts) == 0 {
-		return ""
+	title, content, ok := api.KnowledgeBody(n.DB, kid, projectID)
+	if !ok {
+		jerr(w, 404, "knowledge not found")
+		return
 	}
-	return "## 知识库（历史任务沉淀，按需应用）\n\n" + strings.Join(parts, "\n\n") + "\n"
+	jout(w, 200, map[string]any{"id": kid, "title": title, "content": content})
 }
 
 // approvalWait 审批等待上限；超过即自动拒绝（与节点端 cmd/argus-node/approval.go 一致）。
@@ -589,18 +615,13 @@ func (n *NodeAPI) GetApproval(w http.ResponseWriter, r *http.Request) {
 // ReportResult: POST /api/nodes/result — 节点执行完毕回传 findings/assets/logs/traffic。
 func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TaskID   int64  `json:"task_id"`
-		Status   string `json:"status"` // done | failed | partial
-		Message  string `json:"message"`
-		Findings []struct {
-			Name     string `json:"name"`
-			Severity string `json:"severity"`
-			Target   string `json:"target"`
-			Detail   string `json:"detail"`
-			Evidence string `json:"evidence"`
-			PoC      string `json:"poc"`
-		} `json:"findings"`
-		Assets []struct {
+		TaskID  int64  `json:"task_id"`
+		Status  string `json:"status"` // done | failed | partial
+		Message string `json:"message"`
+		// 原样透传：persistNodeBatch 统一解码（含 status 与 steps——接口自己的
+		// 匿名结构曾缺这两个字段，转发时被丢掉）
+		Findings json.RawMessage `json:"findings"`
+		Assets   []struct {
 			Type   string `json:"type"`
 			Value  string `json:"value"`
 			Detail string `json:"detail"`
@@ -618,15 +639,38 @@ func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 			ResponseSnippet string `json:"response_snippet"`
 			SourceTool      string `json:"source_tool"`
 		} `json:"traffic"`
-		Report string `json:"report"` // 任务最终 Markdown 报告（落 reports 表）
+		Report string           `json:"report"` // 任务最终 Markdown 报告（落 reports 表）
+		Tokens map[string]int64 `json:"tokens"` // 任务级 token 用量 {prompt,completion,calls}（落 tasks.tokens）
+		// 分模型用量 {模型 ID: {prompt,completion,calls}}——分层用脑后各角色可能是
+		// 不同模型，合计看不出谁花了多少
+		TokensByModel map[string]map[string]int64 `json:"tokens_by_model"`
+		Knowledge     []api.KnowledgeIn           `json:"knowledge"` // 本任务沉淀的经验（落知识库）
+		// 发现的三种形态：新增 / 运行中的状态更新 / 最终结果的全量对账（见 upsertFinding）
+		FindingUpdates json.RawMessage `json:"finding_updates"`
+		FindingUpserts json.RawMessage `json:"finding_upserts"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == 0 {
 		jerr(w, 422, "task_id required")
 		return
 	}
-	if err := n.persistNodeBatch(req.TaskID, req.Findings, req.Assets, req.Logs, req.Traffic); err != nil {
+	if err := n.persistNodeBatch(req.TaskID, req.Findings, req.Assets, req.Logs, req.Traffic,
+		req.Knowledge, req.FindingUpdates, req.FindingUpserts); err != nil {
 		jerr(w, 500, err.Error())
 		return
+	}
+	if len(req.Tokens) > 0 {
+		// 合计与分模型用量存进同一个 JSON：合计键保持原样（仪表盘按它汇总），
+		// 分模型的放在 "models" 下
+		tokens := map[string]any{}
+		for k, v := range req.Tokens {
+			tokens[k] = v
+		}
+		if len(req.TokensByModel) > 0 {
+			tokens["models"] = req.TokensByModel
+		}
+		if b, err := json.Marshal(tokens); err == nil {
+			_, _ = n.DB.Exec(`UPDATE tasks SET tokens=? WHERE id=?`, string(b), req.TaskID)
+		}
 	}
 	status := req.Status
 	if status == "" {
@@ -639,40 +683,41 @@ func (n *NodeAPI) ReportResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 已停止的任务不覆盖状态（操作员停止优先于执行结果），数据照常入库
+	// 已停止的任务不覆盖状态（操作员/看门狗停止优先于执行结果），数据照常入库；
+	// 看门狗写下的代停原因保留，节点侧的收尾说明接在其后
+	msg := req.Message
+	var curStatus, curMsg string
+	_ = n.DB.QueryRow(`SELECT status, message FROM tasks WHERE id=?`, req.TaskID).Scan(&curStatus, &curMsg)
+	if curStatus == "stopped" && strings.HasPrefix(curMsg, watchdogMark) {
+		msg = curMsg + "；节点侧：" + req.Message
+	}
 	if _, err := n.DB.Exec(`UPDATE tasks SET status=CASE WHEN status='stopped' THEN status ELSE ? END,
 		finished_at=?, message=? WHERE id=?`,
-		status, store.Now(), req.Message, req.TaskID); err != nil {
+		status, store.Now(), msg, req.TaskID); err != nil {
 		jerr(w, 500, err.Error())
 		return
 	}
 	intel.Discard(req.TaskID) // 任务结束丢弃未消费的运行中情报
+	if n.Watchdog != nil {
+		n.Watchdog.Forget(req.TaskID) // 执行心跳表不留已完成任务
+	}
 	n.Bus.Publish("task_done", map[string]any{"task_id": req.TaskID, "status": status})
 	jout(w, 200, map[string]any{"ok": true})
 }
 
 // NodeBatch: Progress / ReportResult 共用的批量落库。
-func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic any) error {
-	// findings / assets / logs / traffic 为匿名结构切片，走 JSON 重编码最省事
+func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic, knowledge,
+	findingUpdates, findingUpserts any) error {
+	// 各参数为匿名结构切片，走 JSON 重编码最省事
 	buf, _ := json.Marshal(map[string]any{
 		"findings": findings, "assets": assets, "logs": logs, "traffic": traffic,
+		"knowledge": knowledge, "finding_updates": findingUpdates, "finding_upserts": findingUpserts,
 	})
 	var req struct {
-		Findings []struct {
-			Name     string `json:"name"`
-			Severity string `json:"severity"`
-			Target   string `json:"target"`
-			Detail   string `json:"detail"`
-			Evidence string `json:"evidence"`
-			PoC      string `json:"poc"`
-			Steps    []struct {
-				Note       string `json:"note"`
-				Request    string `json:"request"`
-				Response   string `json:"response"`
-				Conclusion string `json:"conclusion"`
-			} `json:"steps"`
-		} `json:"findings"`
-		Assets []struct {
+		Findings       []nodeFinding `json:"findings"`
+		FindingUpdates []nodeFinding `json:"finding_updates"`
+		FindingUpserts []nodeFinding `json:"finding_upserts"`
+		Assets         []struct {
 			Type   string `json:"type"`
 			Value  string `json:"value"`
 			Detail string `json:"detail"`
@@ -690,28 +735,25 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 			ResponseSnippet string `json:"response_snippet"`
 			SourceTool      string `json:"source_tool"`
 		} `json:"traffic"`
+		Knowledge []api.KnowledgeIn `json:"knowledge"`
 	}
 	_ = json.Unmarshal(buf, &req)
-	for _, f := range req.Findings {
-		sev := f.Severity
-		if sev == "" {
-			sev = "info"
+	var projectID int64
+	_ = n.DB.QueryRow(`SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID)
+	// 经验入库（任务后复盘 / knowledge_save / 验证过的凭据）。单条失败不影响
+	// 其余落库——发现与日志比知识条目要紧。
+	for _, k := range req.Knowledge {
+		if _, _, err := api.SaveKnowledgeAuto(n.DB, k, projectID, taskID); err != nil {
+			log.Printf("[knowledge] task %d「%s」入库失败: %v", taskID, k.Title, err)
 		}
-		// 去重（蓝本 report_finding 自动去重）：同项目同名同目标已存在则跳过
-		//（agent 跨步骤重复上报 / progress+result 双写的兜底）
-		res, err := n.DB.Exec(`INSERT INTO findings(project_id,name,severity,target,detail,evidence,poc,source)
-			SELECT project_id,?,?,?,?,?,?,'node' FROM tasks WHERE id=?
-			AND NOT EXISTS(SELECT 1 FROM findings fl WHERE fl.project_id=tasks.project_id AND fl.name=? AND fl.target=?)`,
-			f.Name, sev, f.Target, f.Detail, f.Evidence, f.PoC, taskID, f.Name, f.Target)
-		if err != nil {
-			return err
-		}
-		// 利用链步骤随 finding 落 finding_steps（蓝本 FindingStep）
-		fid, _ := res.LastInsertId()
-		for seq, st := range f.Steps {
-			_, _ = n.DB.Exec(`INSERT INTO finding_steps(finding_id,project_id,seq,note,request,response,conclusion)
-				SELECT ?,project_id,?,?,?,?,? FROM tasks WHERE id=?`,
-				fid, seq+1, st.Note, st.Request, st.Response, st.Conclusion, taskID)
+	}
+	// 发现：按（项目、名称、目标）插入或更新。三路合流——新增（findings）、运行中
+	// 的状态更新（finding_updates）、最终结果的全量对账（finding_upserts）。
+	for _, group := range [][]nodeFinding{req.Findings, req.FindingUpdates, req.FindingUpserts} {
+		for _, f := range group {
+			if err := n.upsertFinding(projectID, f); err != nil {
+				return err
+			}
 		}
 	}
 	for _, s := range req.Assets {
@@ -743,22 +785,132 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 			SELECT project_id,?,?,?,?,?,?,? FROM tasks WHERE id=?`,
 			taskID, t.Method, t.URL, t.RequestBody, t.Status, t.ResponseSnippet, t.SourceTool, taskID)
 	}
+	stages := make([]string, len(req.Logs))
+	for i, l := range req.Logs {
+		stages[i] = l.Stage
+	}
+	n.advanceStage(taskID, stages)
 	return nil
+}
+
+// nodeFinding 节点回传的一条发现（含利用链步骤；与 pipeline.Finding 同形）。
+type nodeFinding struct {
+	Name     string `json:"name"`
+	Severity string `json:"severity"`
+	Target   string `json:"target"`
+	Detail   string `json:"detail"`
+	Evidence string `json:"evidence"`
+	PoC      string `json:"poc"`
+	Status   string `json:"status"`
+	Steps    []struct {
+		Note       string `json:"note"`
+		Request    string `json:"request"`
+		Response   string `json:"response"`
+		Conclusion string `json:"conclusion"`
+	} `json:"steps"`
+}
+
+// upsertFinding 按（项目、名称、目标）落一条发现：不存在则插入（严重度、状态
+// 取节点上报值）；已存在则以后来的为准更新严重度/详情/证据/PoC/状态（空值
+// 不覆盖），并整体替换其利用链步骤。
+//
+// 原先只有「不存在才插入」一条路：节点随后标记的「确认 / 误报」与补充的步骤
+// 永远到不了 server（阶段模式的「AI 验证」阶段因此形同虚设），插入时也没写
+// status；且发现已存在时照样取 LastInsertId——单连接下拿到的是这条连接上一次
+// 成功插入的任意行，步骤被挂到了错误的发现上。
+func (n *NodeAPI) upsertFinding(projectID int64, f nodeFinding) error {
+	var id int64
+	err := n.DB.QueryRow(`SELECT id FROM findings WHERE project_id=? AND name=? AND target=?`,
+		projectID, f.Name, f.Target).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		sev, status := f.Severity, f.Status
+		if sev == "" {
+			sev = "info"
+		}
+		if status == "" {
+			status = "pending"
+		}
+		res, err := n.DB.Exec(`INSERT INTO findings(project_id,name,severity,target,detail,evidence,poc,status,source)
+			VALUES(?,?,?,?,?,?,?,?,'node')`,
+			projectID, f.Name, sev, f.Target, f.Detail, f.Evidence, f.PoC, status)
+		if err != nil {
+			return err
+		}
+		id, _ = res.LastInsertId() // 真实插入，这个 id 才可信
+	case err != nil:
+		return err
+	default:
+		if _, err := n.DB.Exec(`UPDATE findings SET
+			severity=COALESCE(NULLIF(?,''),severity), detail=COALESCE(NULLIF(?,''),detail),
+			evidence=COALESCE(NULLIF(?,''),evidence), poc=COALESCE(NULLIF(?,''),poc),
+			status=COALESCE(NULLIF(?,''),status) WHERE id=?`,
+			f.Severity, f.Detail, f.Evidence, f.PoC, f.Status, id); err != nil {
+			return err
+		}
+		if _, err := n.DB.Exec(`DELETE FROM finding_steps WHERE finding_id=?`, id); err != nil {
+			return err
+		}
+	}
+	for seq, st := range f.Steps {
+		if _, err := n.DB.Exec(`INSERT INTO finding_steps(finding_id,project_id,seq,note,request,response,conclusion)
+			VALUES(?,?,?,?,?,?,?)`,
+			id, projectID, seq+1, st.Note, st.Request, st.Response, st.Conclusion); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stagedOrder 阶段模式流水线顺序（与 pipeline.STAGES 一致，看板进度条同序）。
+var stagedOrder = []string{"recon", "mapping", "vulnscan", "verify", "report"}
+
+func stageIndex(stage string) int {
+	for i, s := range stagedOrder {
+		if s == stage {
+			return i
+		}
+	}
+	return -1
+}
+
+// advanceStage 阶段模式的进度投影：节点日志条目自带结构化 stage 字段，按
+// 流水线顺序推进 tasks.current_stage / stages_done——看板顶部五阶段进度条
+// 读它（原先无写入点，进度条永远停在第 0 步）。只前进不后退：progress 批次
+// 并发到达时乱序不致回退；自主模式与未知 stage 不适用。
+func (n *NodeAPI) advanceStage(taskID int64, stages []string) {
+	next := ""
+	for _, s := range stages {
+		if stageIndex(s) > stageIndex(next) {
+			next = s
+		}
+	}
+	if stageIndex(next) < 0 {
+		return
+	}
+	var mode, current string
+	if err := n.DB.QueryRow(`SELECT mode,current_stage FROM tasks WHERE id=?`, taskID).
+		Scan(&mode, &current); err != nil || mode != "staged" || stageIndex(next) <= stageIndex(current) {
+		return
+	}
+	done := []string{}
+	for _, s := range stagedOrder[:stageIndex(next)] {
+		done = append(done, s)
+	}
+	doneJSON, _ := json.Marshal(done)
+	// 以读到的当前值作条件：并发批次里只有「推进」的那次生效
+	_, _ = n.DB.Exec(`UPDATE tasks SET current_stage=?, stages_done=? WHERE id=? AND current_stage=?`,
+		next, string(doneJSON), taskID, current)
 }
 
 // Progress: POST /api/nodes/progress — 节点执行中增量上报（长任务进度可见）。
 func (n *NodeAPI) Progress(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TaskID   int64 `json:"task_id"`
-		Findings []struct {
-			Name     string `json:"name"`
-			Severity string `json:"severity"`
-			Target   string `json:"target"`
-			Detail   string `json:"detail"`
-			Evidence string `json:"evidence"`
-			PoC      string `json:"poc"`
-		} `json:"findings"`
-		Assets []struct {
+		TaskID int64 `json:"task_id"`
+		// 原样透传：persistNodeBatch 统一解码（含 status 与 steps——接口自己的
+		// 匿名结构曾缺这两个字段，转发时被丢掉）
+		Findings json.RawMessage `json:"findings"`
+		Assets   []struct {
 			Type   string `json:"type"`
 			Value  string `json:"value"`
 			Detail string `json:"detail"`
@@ -776,12 +928,16 @@ func (n *NodeAPI) Progress(w http.ResponseWriter, r *http.Request) {
 			ResponseSnippet string `json:"response_snippet"`
 			SourceTool      string `json:"source_tool"`
 		} `json:"traffic"`
+		Knowledge      []api.KnowledgeIn `json:"knowledge"`
+		FindingUpdates json.RawMessage   `json:"finding_updates"` // 运行中被更新过的发现
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == 0 {
 		jerr(w, 422, "task_id required")
 		return
 	}
-	if err := n.persistNodeBatch(req.TaskID, req.Findings, req.Assets, req.Logs, req.Traffic); err != nil {
+	// 进度上报不做全量对账：finding_upserts 留空（仅最终结果携带）
+	if err := n.persistNodeBatch(req.TaskID, req.Findings, req.Assets, req.Logs, req.Traffic,
+		req.Knowledge, req.FindingUpdates, nil); err != nil {
 		jerr(w, 500, err.Error())
 		return
 	}
@@ -874,6 +1030,27 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 		if req.NodeToken == "" {
 			req.NodeToken = "argus-node-auto"
 		}
+	}
+	// 节点程序来源：平台推送（默认，上传 server 本机二进制）/ GitHub 下载
+	//（远端机器直接从 Release 下载）。GitHub 来源的私有仓库鉴权在 server
+	// 侧完成——换取签名下载地址下发，token 不落远端；凭据取设置页的
+	// GitHub Token，未配置时回落环境变量 GITHUB_TOKEN。
+	switch req.Source {
+	case "", deploy.SourceServer:
+		req.Source = deploy.SourceServer
+	case deploy.SourceGitHub:
+		// 仓库/版本格式入口预检——免得 SSH 连上远端才报格式错
+		if err := deploy.CheckReleaseRef(req.ReleaseRepo, req.ReleaseTag); err != nil {
+			jerr(w, 422, err.Error())
+			return
+		}
+		req.GitHubToken = store.GetSetting(n.DB, "github_token")
+		if req.GitHubToken == "" {
+			req.GitHubToken = os.Getenv("GITHUB_TOKEN")
+		}
+	default:
+		jerr(w, 422, "source must be server|github")
+		return
 	}
 	// BinaryPath 留空——Deploy 内部会检测远端架构自动选择
 
