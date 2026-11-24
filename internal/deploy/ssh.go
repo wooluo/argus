@@ -1,8 +1,10 @@
 package deploy
 
-// ssh.go: SSH 引导式节点部署——UI 填 VPS 连接信息，server 通过 SSH
-// 上传 argus-node 二进制并拉起服务，节点随即自行注册回连。
-// 解决 Pull 架构的"鸡生蛋"引导问题。
+// ssh.go: SSH 引导式节点部署——UI 填 VPS 连接信息，server 通过 SSH 把
+// argus-node 装到远端并拉起服务，节点随即自行注册回连。
+// 解决 Pull 架构的"鸡生蛋"引导问题。节点程序有两种来源：
+//   - 平台推送（默认）：上传 server 本机的 argus-node 二进制；
+//   - GitHub 下载：远端机器直接从 GitHub Release 下载（见 release.go）。
 
 import (
 	"bytes"
@@ -23,18 +25,27 @@ import (
 
 // SSHConfig SSH 连接参数（UI 表单提交）。
 type SSHConfig struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Username   string `json:"username"`
-	AuthType   string `json:"auth_type"` // password | key
-	Password   string `json:"password,omitempty"`
-	PrivateKey string `json:"private_key,omitempty"` // PEM 格式（可选）
-	NodeName   string `json:"node_name"`
-	ServerURL  string `json:"server_url"`  // 节点回连地址
-	NodeToken  string `json:"node_token"`  // 节点注册 token
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	Username     string `json:"username"`
+	AuthType     string `json:"auth_type"` // password | key
+	Password     string `json:"password,omitempty"`
+	PrivateKey   string `json:"private_key,omitempty"` // PEM 格式（可选）
+	NodeName     string `json:"node_name"`
+	ServerURL    string `json:"server_url"`              // 节点回连地址
+	NodeToken    string `json:"node_token"`              // 节点注册 token
 	SudoPassword string `json:"sudo_password,omitempty"` // 非 root 部署的 sudo 密码（空=回退登录密码，Kali 默认二者相同）
-	BinaryPath string `json:"binary_path"` // 本机 argus-node 二进制路径
-	Tunnel     bool   `json:"tunnel"`      // SSH 隧道回连（NAT/内网 server 推荐）
+	BinaryPath   string `json:"binary_path"`             // 本机 argus-node 二进制路径
+	Tunnel       bool   `json:"tunnel"`                  // SSH 隧道回连（NAT/内网 server 推荐）
+
+	// 节点程序来源：SourceServer（空，平台推送）| SourceGitHub（远端从 GitHub
+	// Release 下载）。后两项仅 GitHub 来源使用。
+	Source      string `json:"source"`
+	ReleaseRepo string `json:"release_repo"` // 仓库 owner/repo（空=release.DefaultReleaseRepo）
+	ReleaseTag  string `json:"release_tag"`  // 空/latest=最新 Release，否则指定 tag（如 v0.1.0）
+	// GitHubToken 私有仓库鉴权，DeployNode 从设置页注入。只在 server 侧换
+	// 签名下载地址用——不序列化（tunnel_ssh 落库、远端命令均不带它）。
+	GitHubToken string `json:"-"`
 }
 
 // Result 部署结果。
@@ -144,16 +155,23 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	}
 	step("目标: Linux " + remoteArch)
 
-	// 3. 按远端架构自动选择二进制
-	binaryPath := pickBinary(remoteArch)
-	if binaryPath == "" {
-		return fail(fmt.Sprintf(
-			"本机没有 %s 架构的 argus-node 二进制。请先交叉编译：\n"+
-				"  CGO_ENABLED=0 GOOS=linux GOARCH=%s go build -o argus-node-linux-%s ./cmd/argus-node",
-			remoteArch, goArchOf(remoteArch), goArchOf(remoteArch)))
+	// 3. 节点程序来源：平台推送（上传 server 本机二进制）/ GitHub 下载（远端自取）
+	goArch := goArchOf(remoteArch)
+	fromGitHub := cfg.Source == SourceGitHub
+	if fromGitHub {
+		step("节点程序来源: GitHub Release（远端机器直接下载，server 不上传）")
+	} else {
+		binaryPath := pickBinary(remoteArch)
+		if binaryPath == "" {
+			return fail(fmt.Sprintf(
+				"本机没有 %s 架构的 argus-node 二进制。请先交叉编译：\n"+
+					"  CGO_ENABLED=0 GOOS=linux GOARCH=%s go build -o argus-node-linux-%s ./cmd/argus-node\n"+
+					"或把节点程序来源改选「GitHub 下载」（server 无需本机二进制）",
+				remoteArch, goArch, goArch))
+		}
+		cfg.BinaryPath = binaryPath
+		step("二进制: " + filepath.Base(binaryPath))
 	}
-	cfg.BinaryPath = binaryPath
-	step("二进制: " + filepath.Base(binaryPath))
 
 	// 3.5 环境探测 + sudo 谈判——刻意赶在上传前：该机 exec 通道输出随机
 	// 丢失且上传大文件后高发，命令执行本身可靠。sudo 验证走「效果落盘」：
@@ -231,42 +249,53 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		}
 	}
 
-	// 4. 上传二进制（cat 写入，7MB 给足 3 分钟）+ 字节数校验
-	//（幽灵会吞掉上传错误导致 exit 0 假成功——校验远端实际字节数，
-	// 不符自动重传一次；wc 无输出时尽力而为放行）
-	step("上传二进制（约 7MB，视上行带宽 10s-3min）…")
+	// 4. 节点程序落到远端 /tmp/argus-node + 字节数校验（平台推送 / GitHub
+	// 下载两条来源在此汇合，后续安装启动步骤共用）
 	localSize := int64(0)
-	if st, err := os.Stat(cfg.BinaryPath); err == nil {
-		localSize = st.Size()
-	}
-	verifyUpload := func() bool {
-		if localSize == 0 {
+	if fromGitHub {
+		var err error
+		if localSize, err = fetchFromGitHub(cfg, goArch, "/tmp/argus-node",
+			func(cmd string, timeout time.Duration) (string, error) {
+				return remoteRun(client, cmd, timeout)
+			}, probeOne, step); err != nil {
+			return fail(err.Error())
+		}
+	} else {
+		// 上传（cat 写入，7MB 给足 3 分钟）；幽灵会吞掉上传错误导致 exit 0
+		// 假成功——校验远端实际字节数，不符自动重传一次；wc 无输出时尽力而为放行
+		step("上传二进制（约 7MB，视上行带宽 10s-3min）…")
+		if st, err := os.Stat(cfg.BinaryPath); err == nil {
+			localSize = st.Size()
+		}
+		verifyUpload := func() bool {
+			if localSize == 0 {
+				return true
+			}
+			ns := strings.Fields(probeOne("wc -c < /tmp/argus-node"))
+			if len(ns) == 0 {
+				return true // 幽灵无输出 → 放行
+			}
+			if v, err := strconv.ParseInt(ns[0], 10, 64); err == nil && v != localSize {
+				step(fmt.Sprintf("远端字节数 %d ≠ 本地 %d（上传不完整）", v, localSize))
+				return false
+			}
 			return true
 		}
-		ns := strings.Fields(probeOne("wc -c < /tmp/argus-node"))
-		if len(ns) == 0 {
-			return true // 幽灵无输出 → 放行
-		}
-		if v, err := strconv.ParseInt(ns[0], 10, 64); err == nil && v != localSize {
-			step(fmt.Sprintf("远端字节数 %d ≠ 本地 %d（上传不完整）", v, localSize))
-			return false
-		}
-		return true
-	}
-	if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
-		step("上传报错: " + err.Error())
-	}
-	if !verifyUpload() {
-		step("校验不符，重传一次…")
 		if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
-			return fail(fmt.Sprintf("重传失败: %v", err))
+			step("上传报错: " + err.Error())
 		}
 		if !verifyUpload() {
-			return fail(fmt.Sprintf("二进制字节数校验仍不符（本地 %d；磁盘满？/tmp 受限？"+
-				"——远端执行 df -h /tmp 自查）", localSize))
+			step("校验不符，重传一次…")
+			if err := uploadFile(client, cfg.BinaryPath, "/tmp/argus-node"); err != nil {
+				return fail(fmt.Sprintf("重传失败: %v", err))
+			}
+			if !verifyUpload() {
+				return fail(fmt.Sprintf("二进制字节数校验仍不符（本地 %d；磁盘满？/tmp 受限？"+
+					"——远端执行 df -h /tmp 自查）", localSize))
+			}
 		}
+		step("二进制已上传（字节数校验通过）")
 	}
-	step("二进制已上传（字节数校验通过）")
 
 	// 5. 安装 + 配置 systemd + 启动——分步执行 + echo 标记判定 + 失败重试。
 	// 该 VPS 的 exec 通道存在间歇性幽灵（外部命令输出/exit 码随机丢失，
@@ -653,6 +682,29 @@ func uploadFile(client *ssh.Client, localPath, remotePath string) error {
 	case <-time.After(3 * time.Minute):
 		_ = session.Signal(ssh.SIGKILL)
 		return fmt.Errorf("上传超时（>3min，上行带宽不足？）")
+	}
+}
+
+// remoteRun 在远端执行一条命令并返回合并输出（GitHub 下载用）。成败不由
+// 本函数判定——该机 exec 通道会随机吞输出与 exit 码（见 DeployWithProgress
+// 注释），调用方按标记 + 效果校验自行解读。
+func remoteRun(client *ssh.Client, cmd string, timeout time.Duration) (string, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+	var out bytes.Buffer
+	session.Stdout = &out
+	session.Stderr = &out
+	done := make(chan error, 1)
+	go func() { done <- session.Run(cmd) }()
+	select {
+	case err := <-done:
+		return out.String(), err
+	case <-time.After(timeout):
+		_ = session.Signal(ssh.SIGKILL)
+		return out.String(), fmt.Errorf("命令超时（>%s）", timeout)
 	}
 }
 
