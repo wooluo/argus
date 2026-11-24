@@ -172,7 +172,7 @@ func (a *API) TestNodeSSH(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			// TCP+认证已过、命令成功但输出被吞——按可用处理并如实标注
 			respondJSON(w, http.StatusOK, map[string]any{
-				"ok":   true,
+				"ok": true,
 				"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d；远端输出被吞无法回显，该机已知 SSH 库输出丢失问题）",
 					conf.Username, conf.Host, conf.Port),
 			})
