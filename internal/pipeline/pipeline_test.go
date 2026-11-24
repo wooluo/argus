@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wooluo/argus/internal/llm"
 	"github.com/wooluo/argus/internal/scope"
@@ -71,7 +72,11 @@ func TestRunAutonomous(t *testing.T) {
 }
 
 func TestRunStagedFailure(t *testing.T) {
-	// LLM 服务器直接 500 → 任务 failed 而非 panic
+	// LLM 服务器直接 500 → 退避重试耗尽后任务 failed 而非 panic
+	//（策略调快，免得等满默认的 3 分钟退避序列）
+	fast := llm.RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Budget: time.Second}
+	llm.SetRetryPolicy(fast)
+	defer llm.SetRetryPolicy(llm.DefaultRetryPolicy())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))
@@ -79,6 +84,9 @@ func TestRunStagedFailure(t *testing.T) {
 	res := Run(context.Background(), briefFor("staged", srv.URL), nil)
 	if res.Status != "failed" {
 		t.Fatalf("expected failed, got %s", res.Status)
+	}
+	if !strings.Contains(res.Message, "已重试 2 次") {
+		t.Fatalf("失败信息应说明重试情况: %s", res.Message)
 	}
 }
 

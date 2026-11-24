@@ -60,8 +60,8 @@ func (ReportFindingTool) Execute(ctx context.Context, args map[string]any, tc *C
 		return "", err
 	}
 	return MustJSON(map[string]any{
-		"ok": true, "finding_id": fid, "dedup": fid < 0,
-		"note": "已入库。接下来可用 update_finding 更新状态、finding_step 记录利用链步骤",
+		"ok": true, "finding_id": fid,
+		"note": "已入库（同名同目标只保留一条）。接下来用 finding_step 记录利用链步骤、update_finding 更新状态",
 	}), nil
 }
 
@@ -80,8 +80,8 @@ func (UpdateFindingTool) Parameters() map[string]any {
 	return Schema(map[string]any{
 		"finding_id": Prop("integer", "漏洞 ID"),
 		"status":     PropEnum("目标状态", "confirmed", "false_positive"),
-		"note":       Prop("string", "验证说明/误报原因，可选"),
-	}, "finding_id", "status")
+		"note":       Prop("string", "验证说明 / 误报原因：写清依据（复核了什么、看到什么），会附在该条目的详情里"),
+	}, "finding_id", "status", "note")
 }
 func (UpdateFindingTool) Execute(ctx context.Context, args map[string]any, tc *Context) (string, error) {
 	fid := int64(ArgInt(args, "finding_id", 0))
@@ -97,7 +97,10 @@ func (UpdateFindingTool) Execute(ctx context.Context, args map[string]any, tc *C
 	if err := tc.Reporter.UpdateFinding(ctx, fid, patch); err != nil {
 		return "", err
 	}
-	return MustJSON(map[string]any{"ok": true, "finding_id": fid, "status": status}), nil
+	return MustJSON(map[string]any{
+		"ok": true, "finding_id": fid, "status": status,
+		"note": "状态与验证说明已写回该条目，并同步到 server 的发现库",
+	}), nil
 }
 
 func init() { Register(UpdateFindingTool{}) }

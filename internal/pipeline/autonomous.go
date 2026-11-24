@@ -8,59 +8,86 @@ import (
 	"strings"
 
 	"github.com/wooluo/argus/internal/agent"
-	"github.com/wooluo/argus/internal/llm"
 	"github.com/wooluo/argus/internal/tools"
 )
 
-// runAutonomous 单会话全工具自主执行；Agent 最终输出若已是报告直接采用。
+// runAutonomous 单会话全工具自主执行；收工前过一次独立盲区审查，收工后由独立
+// 核验者复核发现（见 review.go）；Agent 最终输出若已是报告直接采用。
 func runAutonomous(ctx context.Context, b Brief, tc *tools.Context, rep *memReporter,
-	res *Result, client *llm.Client) {
+	res *Result, rc roleClients, tb timeBudget) {
 	// 自适应步数预算（移植自 AutoPentent：对数缩放，边际收益递减）：
 	// base × max(1, log2(1+资产数)/6)，下限 60 上限 300
 	base := 120
 	if b.AgentMaxSteps > 0 {
 		base = b.AgentMaxSteps // 自定义 Agent（hunt 角色）覆盖基准预算
 	}
-	maxSteps := adaptiveSteps(base, rep.assetCount())
+	maxSteps := adaptiveSteps(base, rep.AssetCount())
 	rep.Log(ctx, "system", "hunt", fmt.Sprintf(
 		"任务启动 · 授权范围: %s · 模式: 自主（步数预算 %d）· 模型: %s",
 		tc.Scope.Describe(), maxSteps, rep.LLMDesc()))
 
-	system, brief := autonomousBrief(b)
+	system, brief := autonomousBrief(b, tb)
 	// 自定义 Agent prompt 覆盖（安全红线 SAFETY_RULES 不可被覆盖）
 	if strings.TrimSpace(b.AgentPrompt) != "" {
 		system = strings.TrimSpace(b.AgentPrompt) + "\n\n" + SAFETY_RULES
 		rep.Log(ctx, "system", "hunt", "已加载自定义 Agent 系统提示词（hunt）")
 	}
-	a := agent.New(client, agent.Options{
+	a := agent.New(rc.hunt, agent.Options{
 		TaskID: b.TaskID, Stage: "hunt", ContextLimit: 40,
 		MaxSteps: maxSteps, RequireReport: true,
+		BudgetBase:   base,                                  // 运行中每 25 步按已发现资产量重算预算
+		FinishReview: makeFinishReviewer(b, rep, rc.review), // 收工前独立审查盲区（「审查与核验」的模型）
+		Deadline:     tb.Deadline,                           // 临近强制结束前提醒收敛
+		WrapUpLead:   tb.lead(),
 	}, tools.All(), tc)
 
 	final, err := a.Run(ctx, system, brief)
-	// Token 统计写入结果（server 侧存 tasks.tokens）
-	p, c, calls := a.Tokens()
-	res.Tokens = map[string]int64{"prompt": p, "completion": c, "calls": calls}
 	if err != nil {
 		res.Status, res.Message = failStatus(ctx, err)
 		return
 	}
-	// Agent 输出已是报告（含标题结构）→ 直接采用；否则模板兜底
-	if len(final) > 600 && strings.HasPrefix(strings.TrimSpace(final), "#") {
-		res.Report = final
-		res.Message = "报告已由 Agent 生成"
+
+	// 收工后独立核验：另起只读会话逐条复核发现，结论写回并同步 server
+	var vr *verifyResult
+	if b.VerifyFindings && ctx.Err() == nil {
+		vr = verifyFindings(ctx, b, tc, rep, rc.review)
+	}
+	// 报告取舍：核验改判了发现 → Agent 那份报告已经不成立，按数据重出；
+	// 否则 Agent 的报告（够格的话）直接采用，并附上核验结果
+	ownReport := len(final) > 600 && strings.HasPrefix(strings.TrimSpace(final), "#")
+	overturned := 0
+	if vr != nil {
+		overturned = vr.Overturned()
+	}
+	switch {
+	case vr == nil && ownReport:
+		res.Report, res.Message = final, "报告已由 Agent 生成"
+		return
+	case vr != nil && ownReport && overturned == 0:
+		res.Report, res.Message = final+vr.section(), "报告已由 Agent 生成（含独立核验结果）"
 		return
 	}
-	res.Report = genReport(ctx, b, rep, client)
+	res.Report = genReport(ctx, b, rep, rc.aux) // 模板报告：用「报告与复盘」的模型
 	res.Message = "报告已按模板生成"
+	if vr != nil {
+		res.Report += vr.section()
+		if overturned > 0 {
+			res.Message = fmt.Sprintf("报告已按模板生成（独立核验改判了 %d 条发现，报告据此重写）", overturned)
+		} else {
+			res.Message = "报告已按模板生成（含独立核验结果）"
+		}
+	}
 }
 
 // autonomousBrief 自主模式任务书（移植 _autonomous_brief）。
-func autonomousBrief(b Brief) (system, brief string) {
+func autonomousBrief(b Brief, tb timeBudget) (system, brief string) {
 	system = AUTONOMOUS_SYSTEM_PROMPT + SAFETY_RULES
 	ips, domains := classifyScope(b)
 	var envLines []string
 	envLines = append(envLines, "- 授权范围: "+scopeDescOf(b))
+	if l := tb.line(); l != "" {
+		envLines = append(envLines, l)
+	}
 	if len(domains) > 0 {
 		envLines = append(envLines, fmt.Sprintf(
 			"- 域名目标: %s（可子域名枚举）", strings.Join(domains, ", ")))
@@ -68,11 +95,6 @@ func autonomousBrief(b Brief) (system, brief string) {
 	if len(ips) > 0 {
 		envLines = append(envLines, fmt.Sprintf(
 			"- IP/网段目标: %s（网段先做存活发现）", strings.Join(ips, ", ")))
-	}
-
-	knowledgeBlock := ""
-	if strings.TrimSpace(b.Knowledge) != "" {
-		knowledgeBlock = b.Knowledge
 	}
 
 	rulesBlock := ""
@@ -83,34 +105,8 @@ func autonomousBrief(b Brief) (system, brief string) {
 		}
 		rulesBlock = "## 项目说明 / 测试规范（委托方要求，必须遵守并优先应用）\n" + d + "\n"
 	}
-
-	// 项目情报块（跨任务持久：凭据/入口/提示，蓝本 ProjectIntel）
-	intelBlock := ""
-	if len(b.Intel) > 0 {
-		var lines []string
-		for i, s := range b.Intel {
-			s = strings.TrimSpace(s)
-			if s == "" || len(s) > 600 {
-				s = s[:600]
-			}
-			lines = append(lines, fmt.Sprintf("%d. %s", i+1, s))
-		}
-		intelBlock = "## 项目情报（已知信息，第一步优先验证使用，勿浪费步数重复侦察）\n" +
-			strings.Join(lines, "\n") + "\n"
-	}
-
-	// Skill 领域知识块（启用的 skills，server 下发）
-	skillsBlock := ""
-	if strings.TrimSpace(b.Skills) != "" {
-		skillsBlock = b.Skills
-	}
-
-	// 断点续测块（continue_from 指定任务的历史成果，蓝本 continue_from）
-	continueBlock := ""
-	if strings.TrimSpace(b.ContinueSummary) != "" {
-		continueBlock = "## 断点续测：上一轮任务已完成的成果（勿重复，直接从缺口继续）\n" +
-			b.ContinueSummary + "\n"
-	}
+	// 项目情报 / 知识库索引 / Skills / 断点续测——与阶段模式共用（contextBlocks）
+	intelBlock, knowledgeBlock, skillsBlock, continueBlock := contextBlocks(b)
 
 	brief = `# 渗透测试任务书
 
@@ -126,7 +122,8 @@ func autonomousBrief(b Brief) (system, brief string) {
 - **osint_lookup**：whois / crt.sh 证书透明被动情报（攻击面画像第一步）
 - **自我迭代闭环**：探测到陌生组件/版本时 → github_search 检索公开 POC/CVE
   研究 → github_fetch 下载 POC → 先阅读理解再 run_script 适配执行（良性验证）
-  → 验证过的经验用 knowledge_save 沉淀；本地历史经验用 knowledge_search 检索复用；
+  → 验证过的经验用 knowledge_save 沉淀（标题具体、summary 一句话说清何时用）；
+  本任务内沉淀的用 knowledge_search 检索复用；
   已知可利用漏洞用 msf_search 检索 Metasploit 模块并 kali_exec 脚本化运行
   （msfconsole -q -x "use 模块; set RHOSTS 目标; run; exit"，仅良性验证载荷，
   禁破坏性 payload）；exploitdb_search / exploitdb_fetch 检索并下载 Exploit-DB

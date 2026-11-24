@@ -40,12 +40,12 @@ var STAGE_NAMES = map[string]string{
 var STAGE_TOOLS = map[string][]string{
 	"recon": {"host_discovery", "subfinder", "http_alive", "httpx_probe",
 		"osint_lookup", "fofa_search", "web_login", "http_fetch", "kali_exec", "kali_install",
-		"run_script", "knowledge_save", "knowledge_search", "msf_search",
+		"run_script", "knowledge_save", "knowledge_search", "knowledge_get", "msf_search",
 		"github_search", "github_fetch", "exploitdb_search"},
 	"mapping": {"host_discovery", "http_alive", "httpx_probe", "nmap_scan",
 		"port_scan", "katana_crawl", "web_crawl", "web_login", "http_fetch",
 		"dir_brute", "kali_exec", "kali_install", "run_script",
-		"knowledge_save", "knowledge_search", "msf_search", "github_search",
+		"knowledge_save", "knowledge_search", "knowledge_get", "msf_search", "github_search",
 		"github_fetch", "exploitdb_search"},
 	"vulnscan": {"web_crawl", "web_login", "http_fetch", "nuclei_scan",
 		"sqlmap_detect", "dir_brute", "dnslog_payload", "dnslog_check",
@@ -56,7 +56,7 @@ var STAGE_TOOLS = map[string][]string{
 	"verify": {"web_login", "http_fetch", "http_alive", "update_finding",
 		"dnslog_check", "dnslog_payload", "report_finding", "finding_step",
 		"payload_search", "exploitdb_fetch", "kali_exec", "kali_install",
-		"run_script", "knowledge_save", "knowledge_search", "msf_search",
+		"run_script", "knowledge_save", "knowledge_search", "knowledge_get", "msf_search",
 		"github_search", "github_fetch", "exploitdb_search"},
 	"hunt": nil, // 全量（All()）
 }

@@ -300,10 +300,14 @@ func (WebLoginTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 		tc.Reporter.SaveAsset(ctx, "url", finalURL, map[string]any{
 			"type": "authenticated", "as": username, "source": "web_login",
 		})
-		// 凭据自动情报化：登录成功的凭据入库，后续任务开局即可用
-		tc.Reporter.SaveKnowledge(ctx, "已验证凭据 "+rawURL,
-			fmt.Sprintf("[已验证凭据] %s 用户名 %s 密码 %s（web_login 实测成功，可直接登录测试认证后功能）",
-				rawURL, username, password))
+		// 凭据自动情报化：登录成功的凭据入库（仅本项目可见——不会注入别的
+		// 项目的任务书），后续任务的知识索引直接列出，开局即可用
+		cred := fmt.Sprintf("[已验证凭据] %s 用户名 %s 密码 %s（web_login 实测成功，可直接登录测试认证后功能）",
+			rawURL, username, password)
+		tc.Reporter.SaveKnowledge(ctx, Knowledge{
+			Title: ClipRunes("已验证凭据 "+rawURL, 80), Content: cred, Summary: cred,
+			Scope: KnowledgeScopeProject, Kind: "credential",
+		})
 	}
 	return MustJSON(map[string]any{
 		"tool": "web_login", "ok": okLogin, "status": status,

@@ -132,9 +132,8 @@ func (a *Agent) prematureFinish(finalText string, step, maxSteps, nudges int) st
 	if !a.opts.RequireReport || nudges >= 3 {
 		return ""
 	}
-	looksReport := len(finalText) > 600 && strings.HasPrefix(strings.TrimSpace(finalText), "#")
 	usedRatio := float64(step) / float64(maxSteps)
-	if looksReport || usedRatio >= 0.6 {
+	if looksReport(finalText) || usedRatio >= 0.6 {
 		return ""
 	}
 	tools := a.toolsUsedSummary()

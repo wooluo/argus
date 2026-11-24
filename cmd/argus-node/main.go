@@ -116,25 +116,59 @@ func pollAndRun() bool {
 	elapsed := time.Since(start).Seconds()
 
 	payload := map[string]any{
-		"task_id":  p.Task.TaskID,
-		"status":   res.Status,
-		"message":  fmt.Sprintf("%s（node %s, %.1fs）", res.Message, nodeName, elapsed),
-		// 只发 progress 未上报过的增量（最终 result 全量会造成双写重复）
-		"findings": res.Findings[minInt(res.Reported.Findings, len(res.Findings)):],
-		"assets":   res.Assets[minInt(res.Reported.Assets, len(res.Assets)):],
-		"logs":     res.Logs[minInt(res.Reported.Logs, len(res.Logs)):],
-		"traffic":  res.Traffic[minInt(res.Reported.Traffic, len(res.Traffic)):],
+		"task_id": p.Task.TaskID,
+		"status":  res.Status,
+		"message": fmt.Sprintf("%s（node %s, %.1fs）", res.Message, nodeName, elapsed),
+		// 只发 progress 未被 server 确认过的增量（已确认部分全量重发会造成双写重复）
+		"findings":  res.Findings[minInt(res.Reported.Findings, len(res.Findings)):],
+		"assets":    res.Assets[minInt(res.Reported.Assets, len(res.Assets)):],
+		"logs":      res.Logs[minInt(res.Reported.Logs, len(res.Logs)):],
+		"traffic":   res.Traffic[minInt(res.Reported.Traffic, len(res.Traffic)):],
+		"knowledge": res.Knowledge[minInt(res.Reported.Knowledge, len(res.Knowledge)):],
+		// 发现全量对账：server 按「项目 + 名称 + 目标」插入或更新，运行中被标记的
+		//「确认 / 误报」与补充的利用链步骤以任务结束时的最终状态为准（幂等，重发无副作用）
+		"finding_upserts": res.Findings,
 	}
 	if res.Report != "" {
 		payload["report"] = res.Report
 	}
-	c, _, err := call("POST", "/api/nodes/result", payload)
-	if err != nil || c != 200 {
-		log.Printf("report result failed: %v (code=%d)", err, c)
-	} else {
-		log.Printf("task %d %s in %.1fs", p.Task.TaskID, res.Status, elapsed)
+	if len(res.Tokens) > 0 {
+		payload["tokens"] = res.Tokens // 落 tasks.tokens（仪表盘 token 统计）
+		if len(res.TokensByModel) > 0 {
+			payload["tokens_by_model"] = res.TokensByModel // 分层用脑：按模型拆开的用量
+		}
+	}
+	// 最终结果带退避重试：server 重启窗口/网络抖动不该吞掉整个任务的成果
+	//（送达前任务在 server 侧仍是 assigned，看板会一直显示执行中）
+	for attempt := 1; ; attempt++ {
+		c, _, err := call("POST", "/api/nodes/result", payload)
+		switch {
+		case err == nil && c == 200:
+			log.Printf("task %d %s in %.1fs", p.Task.TaskID, res.Status, elapsed)
+		case attempt >= resultRetries:
+			log.Printf("task %d report result FAILED after %d attempts: %v (code=%d)",
+				p.Task.TaskID, attempt, err, c)
+		default:
+			log.Printf("task %d report result retry %d/%d: %v (code=%d)",
+				p.Task.TaskID, attempt, resultRetries, err, c)
+			time.Sleep(resultRetryDelay(attempt))
+			continue
+		}
+		break
 	}
 	return true
+}
+
+// 最终结果回传重试：最多 resultRetries 次，2s 起退避翻倍、封顶 60s（合计约
+// 8 分钟——覆盖 server 重启/短暂断网，又不至于无限占住节点的执行槽）。
+const resultRetries = 12
+
+func resultRetryDelay(attempt int) time.Duration {
+	d := 2 * time.Second << (attempt - 1)
+	if d > time.Minute {
+		d = time.Minute
+	}
+	return d
 }
 
 // registerAndSave: 注册并把节点 token 落盘。

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/wooluo/argus/internal/llm"
+	"github.com/wooluo/argus/internal/tools"
 )
 
 var reflectJSONRe = regexp.MustCompile(`(?s)\[.*\]`)
@@ -47,10 +48,11 @@ func reflectAfterRun(ctx context.Context, b Brief, res *Result, rep *memReporter
 - 资产 %d 条；审计日志 %d 条
 
 ## 提炼要求
-1. 只写可复用的通用经验：目标环境知识（框架/防护特征与应对）、有效绕过手法、攻击路径经验、工具适配要点、踩坑与捷径
-2. 不写一次性细节；每条 ≤1000 字，结论先行
-3. 没有值得沉淀的就返回 []（宁缺毋滥）
-只输出 JSON 数组（可空），每项 {"title": "...", "content": "..."}，最多 2 条：`,
+1. 只写可复用的经验：目标环境知识（框架/防护特征与应对）、有效手法、测试路径经验、工具适配要点、踩坑与捷径
+2. 每条分三层：title 具体、可复用、不带任务编号；summary 一句话说清教什么、何时用；content 结论先行、≤1000 字
+3. scope：跨目标通用的方法论填 global；只对本项目成立的事实（凭据、目标环境细节）填 project
+4. 不写一次性细节；没有值得沉淀的就返回 []（宁缺毋滥）
+只输出 JSON 数组（可空），每项 {"title": "...", "summary": "...", "scope": "global|project", "content": "..."}，最多 2 条：`,
 		strings.Join(scopeValues(b), ", "), b.ProjectName, toolCalls,
 		findingLine, len(snap.Assets), len(snap.Logs))
 
@@ -66,6 +68,8 @@ func reflectAfterRun(ctx context.Context, b Brief, res *Result, rep *memReporter
 	}
 	var entries []struct {
 		Title   string `json:"title"`
+		Summary string `json:"summary"`
+		Scope   string `json:"scope"`
 		Content string `json:"content"`
 	}
 	if err := json.Unmarshal([]byte(m), &entries); err != nil || len(entries) == 0 {
@@ -77,10 +81,17 @@ func reflectAfterRun(ctx context.Context, b Brief, res *Result, rep *memReporter
 		if i >= 2 || strings.TrimSpace(e.Title) == "" || strings.TrimSpace(e.Content) == "" {
 			continue
 		}
-		if err := rep.SaveKnowledge(ctx,
-			fmt.Sprintf("任务 #%d 复盘：%s", b.TaskID, e.Title),
-			e.Content); err == nil {
-			saved = append(saved, e.Title)
+		// 标题不带任务编号：同一主题的经验在后续任务里命中同一条、更新而非堆重复
+		k := tools.Knowledge{
+			Title: tools.ClipRunes(strings.TrimSpace(e.Title), 80), Content: e.Content,
+			Summary: strings.TrimSpace(e.Summary), Kind: "reflection",
+			Scope: tools.KnowledgeScopeProject, // 未声明范围一律按「仅本项目」——不外泄到别的项目
+		}
+		if strings.EqualFold(strings.TrimSpace(e.Scope), tools.KnowledgeScopeGlobal) {
+			k.Scope = tools.KnowledgeScopeGlobal
+		}
+		if err := rep.SaveKnowledge(ctx, k); err == nil {
+			saved = append(saved, k.Title)
 		}
 	}
 	if len(saved) > 0 {

@@ -19,19 +19,47 @@ func Errorf(format string, args ...any) error {
 	return &Error{Msg: fmt.Sprintf(format, args...)}
 }
 
+// FindingStep 利用链的一步（证据驱动交付：触发请求 + 关键响应 + 本步结论）。
+type FindingStep struct {
+	Note       string `json:"note"`
+	Request    string `json:"request"`
+	Response   string `json:"response"`
+	Conclusion string `json:"conclusion"`
+}
+
 // Finding 工具上报的漏洞条目（report_finding / update_finding 用）。
 type Finding struct {
-	ID       int64    `json:"id"`
-	Name     string   `json:"name"`
-	Severity string   `json:"severity"` // critical/high/medium/low/info
-	Target   string   `json:"target"`
-	Detail   string   `json:"detail"`
-	PoC      string   `json:"poc,omitempty"`
-	Evidence string   `json:"evidence,omitempty"`
-	Source   string   `json:"source"`          // 工具名 / agent
-	Status   string   `json:"status"`          // pending/confirmed/false_positive
-	Steps    []string `json:"steps,omitempty"` // 利用链步骤记录
+	ID       int64         `json:"id"`
+	Name     string        `json:"name"`
+	Severity string        `json:"severity"` // critical/high/medium/low/info
+	Target   string        `json:"target"`
+	Detail   string        `json:"detail"`
+	PoC      string        `json:"poc,omitempty"`
+	Evidence string        `json:"evidence,omitempty"`
+	Source   string        `json:"source"`          // 工具名 / agent
+	Status   string        `json:"status"`          // pending/confirmed/false_positive
+	Steps    []FindingStep `json:"steps,omitempty"` // 利用链步骤记录
 }
+
+// Knowledge 一条待沉淀的经验（节点 → server 知识库）。三层文档：Title 具体
+// 到一眼能认出；Summary 一句话说明教什么、何时用——进任务书的知识索引；
+// Content 完整做法与证据，Agent 命中后按需 knowledge_get 拉取。
+type Knowledge struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	Summary string `json:"summary,omitempty"`
+	// Scope 适用范围：跨目标的通用方法论填 global；只对本项目成立的事实
+	//（凭据、目标环境细节）填 project（默认）——不会注入别的项目的任务书。
+	Scope string `json:"scope,omitempty"`
+	// Kind 来源类别：reflection（任务后复盘）/ agent（knowledge_save）/
+	// credential（验证过的凭据）。
+	Kind string `json:"kind,omitempty"`
+}
+
+const (
+	KnowledgeScopeProject = "project"
+	KnowledgeScopeGlobal  = "global"
+)
 
 // Reporter 节点侧数据上报通道：工具产出（资产/漏洞/证据）经此回传 server。
 type Reporter interface {
@@ -47,9 +75,9 @@ type Reporter interface {
 	SaveTraffic(ctx context.Context, method, rawURL, reqBody string, status int, snippet, sourceTool string)
 	// SaveSession 登录会话上报（server 侧重放复放认证后请求用；节点本地另有磁盘持久化）。
 	SaveSession(ctx context.Context, baseURL, user string, cookies map[string]string)
-	// SaveKnowledge 沉淀可复用经验（后续任务自动携带）。
-	SaveKnowledge(ctx context.Context, title, content string) error
-	// SearchKnowledge 检索历史经验。
+	// SaveKnowledge 沉淀可复用经验（经 server 落知识库，后续任务携带索引）。
+	SaveKnowledge(ctx context.Context, k Knowledge) error
+	// SearchKnowledge 检索本任务内沉淀的经验（跨任务的知识库见任务书索引）。
 	SearchKnowledge(ctx context.Context, query string, limit int) []map[string]any
 	// Log 审计日志（stage/actor/内容）。
 	Log(ctx context.Context, actor, stage, message string)
@@ -205,4 +233,12 @@ func Truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + fmt.Sprintf("\n…(截断，全文 %d 字符)", len(s))
+}
+
+// ClipRunes 按 rune 截断（中文标题/说明按字节截会切出半个字）。
+func ClipRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }

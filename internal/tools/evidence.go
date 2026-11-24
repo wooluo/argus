@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"strings"
 )
 
@@ -39,12 +38,13 @@ func (FindingStepTool) Execute(ctx context.Context, args map[string]any, tc *Con
 	if note == "" || request == "" || response == "" {
 		return "", Errorf("note/request/response 必填")
 	}
-	step := fmt.Sprintf("[步骤] note=%s | request=%s | response=%s", note, request, response)
-	if c := strings.TrimSpace(ArgString(args, "conclusion", "")); c != "" {
-		step += " | conclusion=" + c
-	}
-	// 步骤经 UpdateFinding patch 通道追加（server 侧聚合 steps 字段）
-	err := tc.Reporter.UpdateFinding(ctx, fid, map[string]any{"append_step": step})
+	// 结构化步骤经 UpdateFinding 的 "step" 键追加（随发现的更新同步到 server，
+	// 落 finding_steps——复测功能按它重放）。原先传的是无人处理的 "append_step"
+	// 字符串，步骤被静默丢弃。
+	err := tc.Reporter.UpdateFinding(ctx, fid, map[string]any{"step": FindingStep{
+		Note: note, Request: request, Response: response,
+		Conclusion: strings.TrimSpace(ArgString(args, "conclusion", "")),
+	}})
 	if err != nil {
 		return "", err
 	}

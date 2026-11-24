@@ -7,13 +7,12 @@ import (
 	"strings"
 
 	"github.com/wooluo/argus/internal/agent"
-	"github.com/wooluo/argus/internal/llm"
 	"github.com/wooluo/argus/internal/tools"
 )
 
 // runStaged 五阶段：recon → mapping → vulnscan → verify → report。
 func runStaged(ctx context.Context, b Brief, tc *tools.Context, rep *memReporter,
-	res *Result, client *llm.Client) {
+	res *Result, rc roleClients, tb timeBudget) {
 	for _, stage := range STAGES {
 		if ctx.Err() != nil {
 			res.Status, res.Message = "stopped", "任务被取消"
@@ -23,10 +22,10 @@ func runStaged(ctx context.Context, b Brief, tc *tools.Context, rep *memReporter
 
 		var summary string
 		if stage == "report" {
-			summary = genReport(ctx, b, rep, client)
+			summary = genReport(ctx, b, rep, rc.aux) // 模板报告：用「报告与复盘」的模型
 			res.Report = summary
 		} else {
-			system, brief := stagePrompts(stage, b, rep)
+			system, brief := stagePrompts(stage, b, rep, tb)
 			toolSet := toolsForStage(stage)
 			if len(toolSet) == 0 {
 				res.Status, res.Message = "failed", "阶段 "+stage+" 无可用工具"
@@ -37,8 +36,9 @@ func runStaged(ctx context.Context, b Brief, tc *tools.Context, rep *memReporter
 			if b.AgentMaxSteps > 0 {
 				stageSteps = b.AgentMaxSteps
 			}
-			a := agent.New(client, agent.Options{
+			a := agent.New(rc.hunt, agent.Options{ // 各阶段：用「主循环」的模型
 				TaskID: b.TaskID, Stage: stage, ContextLimit: 40, MaxSteps: stageSteps,
+				Deadline: tb.Deadline, WrapUpLead: tb.lead(), // 临近强制结束前提醒收敛
 			}, toolSet, tc)
 			out, err := a.Run(ctx, system, brief)
 			if err != nil {
@@ -81,18 +81,18 @@ func toolsForStage(stage string) []tools.Tool {
 }
 
 // stagePrompts 阶段提示词（移植 _stage_prompts）。
-func stagePrompts(stage string, b Brief, rep *memReporter) (system, brief string) {
+func stagePrompts(stage string, b Brief, rep *memReporter, tb timeBudget) (system, brief string) {
 	// 自定义 Agent（staged 角色）覆盖：%s 占位符注入阶段名，安全红线保留
 	if strings.TrimSpace(b.AgentPrompt) != "" {
 		return strings.ReplaceAll(b.AgentPrompt, "%s", STAGE_NAMES[stage]) + "\n\n" + SAFETY_RULES,
-			stagedBrief(stage, b, rep)
+			stagedBrief(stage, b, rep, tb)
 	}
 	return fmt.Sprintf(STAGED_SYSTEM_PROMPT, STAGE_NAMES[stage]) + SAFETY_RULES,
-		stagedBrief(stage, b, rep)
+		stagedBrief(stage, b, rep, tb)
 }
 
 // stagedBrief 阶段任务书（内置/自定义 system 共用）。
-func stagedBrief(stage string, b Brief, rep *memReporter) string {
+func stagedBrief(stage string, b Brief, rep *memReporter, tb timeBudget) string {
 	ips, domains := classifyScope(b)
 	scopeDesc := scopeDescOf(b)
 	var scopeLines []string
@@ -119,8 +119,12 @@ func stagedBrief(stage string, b Brief, rep *memReporter) string {
 		rulesLine = "\n## 项目说明 / 测试规范（委托方要求，必须遵守并优先应用）\n" + d + "\n"
 	}
 
+	// 项目情报 / 知识库索引 / Skills / 断点续测：与自主模式同一份（凭据与知识
+	// 不再只在自主模式可见）
+	intelBlock, knowledgeBlock, skillsBlock, continueBlock := contextBlocks(b)
 	common := "\n\n项目名称: " + b.ProjectName + "\n授权范围: " + scopeDesc + "\n" +
-		rulesLine + "\n" + scopeBrief + "\n\n" + dataSummary(rep) + "\n"
+		rulesLine + intelBlock + continueBlock + knowledgeBlock + skillsBlock + tb.line() +
+		"\n" + scopeBrief + "\n\n" + dataSummary(rep) + "\n"
 
 	goals := map[string]string{
 		"recon": reconGoal(ips, domains),

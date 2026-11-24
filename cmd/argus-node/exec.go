@@ -4,11 +4,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
-	"time"
+	"net/url"
 
+	"github.com/wooluo/argus/internal/llm"
 	"github.com/wooluo/argus/internal/pipeline"
 	"github.com/wooluo/argus/internal/scope"
+	"github.com/wooluo/argus/internal/tools"
 )
 
 // pollTask Poll 响应（扩展后含 project 概要与 llm 配置）。
@@ -45,6 +49,18 @@ type pollTask struct {
 		Key   string `json:"key"`
 	} `json:"fofa"`
 	ContinueSummary string `json:"continue_summary"` // 断点续测：上轮成果摘要
+	VerifyFindings  bool   `json:"verify_findings"`  // 收工后独立核验（设置 limits.autonomous_verify）
+	TimeBudget      struct {
+		RemainingSeconds int `json:"remaining_seconds"` // 领取时刻的剩余秒数（0=不限时）
+		LimitSeconds     int `json:"limit_seconds"`     // 总时长上限
+	} `json:"time_budget"` // 时间预算：到点由 server 看门狗代停
+	// 分层用脑：按角色的模型配置（设置页「模型分工」）；没分工的角色不出现
+	Models map[string]struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+		Model   string `json:"model"`
+		Proxy   string `json:"proxy"`
+	} `json:"models"`
 }
 
 // buildBrief 从 Poll 响应组装 pipeline.Brief。
@@ -80,6 +96,21 @@ func (p *pollTask) buildBrief() pipeline.Brief {
 	b.FOFAEmail = p.FOFA.Email
 	b.FOFAKey = p.FOFA.Key
 	b.ContinueSummary = p.ContinueSummary
+	b.VerifyFindings = p.VerifyFindings
+	b.TimeBudgetSeconds = p.TimeBudget.RemainingSeconds
+	b.TimeLimitSeconds = p.TimeBudget.LimitSeconds
+	// 分层用脑：分工给「主循环」的模型覆盖主配置，另两类各自下发
+	roleCfg := func(role string) llm.Config {
+		c, ok := p.Models[role]
+		if !ok || c.BaseURL == "" {
+			return llm.Config{}
+		}
+		return llm.Config{BaseURL: c.BaseURL, APIKey: c.APIKey, Model: c.Model, Proxy: c.Proxy}
+	}
+	if c := roleCfg("hunt"); c.BaseURL != "" {
+		b.LLM = c
+	}
+	b.LLMReview, b.LLMAux = roleCfg("review"), roleCfg("aux")
 	return b
 }
 
@@ -101,24 +132,49 @@ func execTask(p *pollTask) *pipeline.Result {
 	if n := registerMCPTools(p.MCP); n > 0 {
 		log.Printf("[exec] task=%d MCP 注入 %d 个工具", p.Task.TaskID, n)
 	}
-	var lastFlush time.Time
-	onFlush := func(inc pipeline.Result) {
-		if time.Since(lastFlush) < 5*time.Second {
-			return
-		}
-		lastFlush = time.Now()
+	// 知识条目全文拉取（knowledge_get 用）：任务书只带索引，命中后回连 server
+	brief.KnowledgeFetch = knowledgeFetch(brief.TaskID)
+	// 增量上报：节流与重发由 pipeline 的 flusher 负责（≥5s 一次、server 确认
+	// 后才推进游标、失败下个周期重发）——这里只管发并如实返回成败
+	onFlush := func(inc pipeline.Result) error {
 		payload := map[string]any{
-			"task_id":  brief.TaskID,
-			"findings": inc.Findings,
-			"assets":   inc.Assets,
-			"logs":     inc.Logs,
-			"traffic":  inc.Traffic,
+			"task_id":   brief.TaskID,
+			"findings":  inc.Findings,
+			"assets":    inc.Assets,
+			"logs":      inc.Logs,
+			"traffic":   inc.Traffic,
+			"knowledge": inc.Knowledge,
+			// 运行中被改过状态、补充过步骤或说明的发现（尽力而为；收尾有全量对账兜底）
+			"finding_updates": inc.FindingUpdates,
 		}
-		if code, _, err := call("POST", "/api/nodes/progress", payload); err != nil || code != 200 {
-			log.Printf("progress flush skipped (code=%d err=%v)", code, err)
+		code, _, err := call("POST", "/api/nodes/progress", payload)
+		if err != nil || code != 200 {
+			log.Printf("progress flush deferred (code=%d err=%v)", code, err)
+			return fmt.Errorf("code=%d err=%v", code, err)
 		}
+		return nil
 	}
 	log.Printf("[exec] task=%d name=%s mode=%s project=%d → pipeline",
 		p.Task.TaskID, p.Task.Name, p.Task.Mode, p.Task.ProjectID)
 	return pipeline.Run(execCtx, brief, onFlush)
+}
+
+// knowledgeFetch 按需拉取知识条目全文：回连 server 的节点面接口，由 server
+// 按 task_id 判定该条目对本项目是否可见（别的项目的专属条目拿不到）。
+func knowledgeFetch(taskID int64) tools.KnowledgeFetcher {
+	return func(id string) (string, error) {
+		code, body, err := call("GET",
+			fmt.Sprintf("/api/nodes/knowledge/%s?task_id=%d", url.PathEscape(id), taskID), nil)
+		if err != nil || code != 200 {
+			return "", fmt.Errorf("server 返回 code=%d err=%v", code, err)
+		}
+		var res struct {
+			Title   string `json:"title"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(body, &res) != nil || res.Content == "" {
+			return "", errors.New("条目不存在或响应无法解析")
+		}
+		return "# " + res.Title + "\n\n" + res.Content, nil
+	}
 }

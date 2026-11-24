@@ -100,7 +100,7 @@ func (r *retestReporter) SaveTraffic(ctx context.Context, method, rawURL, reqBod
 }
 func (r *retestReporter) SaveFinding(context.Context, tools.Finding) (int64, error)     { return 0, nil }
 func (r *retestReporter) UpdateFinding(context.Context, int64, map[string]any) error    { return nil }
-func (r *retestReporter) SaveKnowledge(context.Context, string, string) error           { return nil }
+func (r *retestReporter) SaveKnowledge(context.Context, tools.Knowledge) error          { return nil }
 func (r *retestReporter) SearchKnowledge(context.Context, string, int) []map[string]any { return nil }
 func (r *retestReporter) Log(context.Context, string, string, string)                   {}
 func (r *retestReporter) LLMDesc() string                                               { return "retest" }
@@ -223,7 +223,7 @@ func (a *API) RetestFinding(w http.ResponseWriter, r *http.Request) {
 			"fixed（已修复，响应不再出现原始证据特征）/ unknown（无法确认，如全被跳过或证据不足）。"+
 			"第一行只输出 still/fixed/unknown，随后不超过 100 字说明。",
 		f.Name, f.Target, tools.Truncate(f.Detail, 300), rb.String())
-	client := llm.NewClient(llm.DefaultProvider(llmConfigFrom(a.DB)))
+	client := llm.NewClient(llm.DefaultProvider(llmConfigForRole(a.DB, "review"))) // 复测判定：分工了用「审查与核验」的模型
 	verdict, err := client.ChatText(r.Context(), system, prompt, 0.1)
 	if err != nil {
 		respondErr(w, http.StatusInternalServerError, "判定失败（LLM）: "+err.Error())
