@@ -60,7 +60,11 @@ func (a *API) ListKnowledge(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		kid := strings.TrimSuffix(e.Name(), ".md")
+		// 无元数据的条目（迁移来的旧库）：标题取文件首行，而不是显示文件名
 		title, enabled := kid, true
+		if t, _, err := knowledgeRead(kid); err == nil && t != "" {
+			title = t
+		}
 		if m := saved[kid]; m != nil {
 			if t, ok := m["title"].(string); ok && t != "" {
 				title = t
@@ -70,11 +74,20 @@ func (a *API) ListKnowledge(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		info, _ := e.Info()
-		out = append(out, map[string]any{
+		item := map[string]any{
 			"id": kid, "title": title, "enabled": enabled,
 			"chars":   info.Size(),
 			"updated": info.ModTime().Format("2006-01-02 15:04"),
-		})
+		}
+		// 任务自动沉淀的条目带说明与来源（适用范围见 scope）
+		if m := saved[kid]; m != nil {
+			for _, k := range []string{"summary", "scope", "source"} {
+				if v, _ := m[k].(string); v != "" {
+					item[k] = v
+				}
+			}
+		}
+		out = append(out, item)
 	}
 	respondJSON(w, http.StatusOK, out)
 }
@@ -105,22 +118,17 @@ func (a *API) CreateKnowledge(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{"ok": true, "id": kid})
 }
 
-// knowledgeSaveMetaDB 落 settings["knowledge"]（{id,title,enabled} 列表，存在即更新）。
+// knowledgeSaveMeta 落 settings["knowledge"]：条目已存在则只改标题与启用位
+// （保留自动条目的说明/适用范围/来源等字段），否则追加。
 func (a *API) knowledgeSaveMeta(kid, title string, enabled bool) {
-	var saved []map[string]any
-	_ = json.Unmarshal([]byte(store.GetSetting(a.DB, "knowledge")), &saved)
-	found := false
-	for i, m := range saved {
+	for _, m := range knowledgeMetaList(a.DB) {
 		if fmt.Sprint(m["id"]) == kid {
-			saved[i] = map[string]any{"id": kid, "title": title, "enabled": enabled}
-			found = true
+			m["title"], m["enabled"] = title, enabled
+			knowledgePutMeta(a.DB, m)
+			return
 		}
 	}
-	if !found {
-		saved = append(saved, map[string]any{"id": kid, "title": title, "enabled": enabled})
-	}
-	b, _ := json.Marshal(saved)
-	_ = store.SetSetting(a.DB, "knowledge", string(b))
+	knowledgePutMeta(a.DB, map[string]any{"id": kid, "title": title, "enabled": enabled})
 }
 
 // KnowledgeContent GET /api/knowledge/{kid}/content — 原文返回。
