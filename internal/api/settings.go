@@ -136,17 +136,19 @@ func (a *API) PutTargetProxy(w http.ResponseWriter, r *http.Request) {
 	a.putProxyKey(w, r, "target_proxy")
 }
 
-// PutLimits PUT /api/settings/limits —— Agent 步数/超时/并发/速率。
+// PutLimits PUT /api/settings/limits —— Agent 步数/超时/并发/速率等运行限制。
+// 按原样存 JSON 对象：里面不只有整数（如布尔开关 autonomous_verify），早先
+// 按整数解码，设置页带着开关保存时会直接 400。
 func (a *API) PutLimits(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Limits map[string]int `json:"limits"`
+		Limits map[string]any `json:"limits"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		respondErr(w, 400, err.Error())
 		return
 	}
 	if in.Limits == nil {
-		in.Limits = map[string]int{}
+		in.Limits = map[string]any{}
 	}
 	if err := saveSettingKey(a.DB, "limits", in.Limits); err != nil {
 		respondErr(w, 500, err.Error())
@@ -159,11 +161,13 @@ func (a *API) PutLimits(w http.ResponseWriter, r *http.Request) {
 // 已存值与默认合并（缺字段补齐）。
 func limitsOrDefault(saved map[string]any) map[string]any {
 	def := map[string]any{
-		"max_agent_steps":  25,  // 阶段模式：每阶段 Agent 最大步数
-		"autonomous_steps": 120, // 自主模式步数基准
-		"tool_timeout":     300, // 单次外部工具超时(秒)
-		"max_concurrency":  10,  // 自研模块并发
-		"request_rate":     20,  // 每秒最大请求数(自研模块)
+		"max_agent_steps":   25,   // 阶段模式：每阶段 Agent 最大步数
+		"autonomous_steps":  120,  // 自主模式步数基准
+		"tool_timeout":      300,  // 单次外部工具超时(秒)
+		"max_concurrency":   10,   // 自研模块并发
+		"request_rate":      20,   // 每秒最大请求数(自研模块)
+		"max_task_minutes":  360,  // 单任务运行时长上限（看门狗到点代停；0=关闭）
+		"autonomous_verify": true, // 自主模式收工后由独立核验者复核发现
 	}
 	if saved == nil {
 		return def

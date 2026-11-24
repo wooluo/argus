@@ -108,6 +108,7 @@ func (a *API) PutTools(w http.ResponseWriter, r *http.Request) {
 func (a *API) TestLLM(w http.ResponseWriter, r *http.Request) {
 	cfg := llmConfigFrom(a.DB)
 	client := llm.NewClient(llm.DefaultProvider(cfg))
+	client.SetRetryPolicy(llm.RetryPolicy{MaxAttempts: 1}) // 连接测试不重试：端点故障时立即报错
 	respondJSON(w, 200, client.TestConnection(r.Context()))
 }
 

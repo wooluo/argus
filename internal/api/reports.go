@@ -265,7 +265,7 @@ func (a *API) GenerateReport(w http.ResponseWriter, r *http.Request) {
 	if detailStr == "" {
 		detailStr = "无确认漏洞"
 	}
-	client := llm.NewClient(llm.DefaultProvider(llmConfigFrom(a.DB)))
+	client := llm.NewClient(llm.DefaultProvider(llmConfigForRole(a.DB, "aux"))) // 报告生成：分工了用「报告与复盘」的模型
 	prompt := "根据以下渗透测试数据生成完整中文 Markdown 报告，结构：\n" +
 		"# 概述（项目背景/范围/方法）\n# 资产统计\n# 漏洞汇总（按严重度表格：编号/名称/严重度/目标/状态）\n" +
 		"# 漏洞详情（每个漏洞：描述/危害/证据/复现/修复建议）\n# 总结与整体安全建议\n\n" +
