@@ -6,9 +6,12 @@ import (
 	"net/http"
 
 	"database/sql"
-	"github.com/go-chi/chi/v5"
 	"strconv"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/wooluo/argus/internal/store"
 )
 
 // ============ Dashboard 域（蓝本 api/dashboard.py dashboard_stats） ============
@@ -131,7 +134,7 @@ func (a *API) GetDashboard(w http.ResponseWriter, r *http.Request) {
 			respondErr(w, 500, err.Error())
 			return
 		}
-		taskStatus[status]++
+		taskStatus[store.PresentStatus(status)]++ // assigned/done → 蓝本词汇（见 store.PresentStatus）
 		tk := parseTokens(tokens)
 		total.Prompt += tk.Prompt
 		total.Completion += tk.Completion
@@ -170,6 +173,7 @@ func (a *API) GetDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		tk := parseTokens(tokens)
 		t.Tokens = tk.Prompt + tk.Completion
+		t.Status = store.PresentStatus(t.Status)
 		recent = append(recent, t)
 	}
 	rows.Close()

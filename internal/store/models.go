@@ -89,6 +89,26 @@ func (t *Task) MarkLive() {
 	t.IsLive = t.Status == "pending" || t.Status == "assigned" || t.Status == "running"
 }
 
+// PresentStatus 任务状态的管理面呈现值。Go 执行面比蓝本多了两个状态值：
+// assigned（已派给节点）与 done（正常完成），而前端与仪表盘按蓝本只认
+// running / completed——不映射的话完成的任务显示成红色、进度条走不完、
+// 「继续测试」不出现、仪表盘完成数恒为 0。库内状态不变，只在出口换词。
+func PresentStatus(status string) string {
+	switch status {
+	case "assigned", "running":
+		return "running"
+	case "done":
+		return "completed"
+	}
+	return status
+}
+
+// Present 管理面出口统一处理：先按库内状态算 is_live，再换状态词。
+func (t *Task) Present() {
+	t.MarkLive()
+	t.Status = PresentStatus(t.Status)
+}
+
 type Asset struct {
 	ID        int     `json:"id"`
 	ProjectID int     `json:"project_id"`
