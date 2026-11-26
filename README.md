@@ -16,6 +16,12 @@ AutoPentest 的 Go 重构：**单二进制 + 分布式节点架构**。LLM Agent
 |---|---|
 | ![探索链路](docs/exploration-graph.png) | ![知识库](docs/knowledge.png) |
 
+## 架构总览
+
+![Argus 架构动图](docs/argus-architecture.gif)
+
+Server / Node 分布式架构与任务执行主流程。
+
 ## 快速开始
 
 ```bash
