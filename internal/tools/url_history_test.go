@@ -17,8 +17,8 @@ func TestGFClassify(t *testing.T) {
 		{"https://example.com/login?redirect=/admin", []string{"open-redirect", "ssrf", "xss"}},
 		{"https://example.com/order?user_id=123", []string{"idor"}},
 		{"https://example.com/debug?debug=true", []string{"debug"}},
-		{"https://example.com/", []string{}},                                  // no query params
-		{"https://example.com/static/style.css", []string{}},                  // no query params
+		{"https://example.com/", []string{}},                 // no query params
+		{"https://example.com/static/style.css", []string{}}, // no query params
 		{"https://example.com/auth?token=abc123", []string{"interesting-param"}},
 	}
 	for _, c := range cases {

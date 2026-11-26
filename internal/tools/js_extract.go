@@ -101,7 +101,7 @@ func (JsExtractTool) Execute(ctx context.Context, args map[string]any, tc *Conte
 			sourceMaps = append(sourceMaps, strings.TrimSpace(m[1]))
 		}
 	}
-		for _, m := range sourceMapJSON.FindAllStringSubmatch(content, -1) {
+	for _, m := range sourceMapJSON.FindAllStringSubmatch(content, -1) {
 		if len(m) > 1 {
 			s := strings.TrimSpace(m[1])
 			found := false
@@ -117,16 +117,16 @@ func (JsExtractTool) Execute(ctx context.Context, args map[string]any, tc *Conte
 		}
 	}
 	// 4. 疑似密钥
-		for _, m := range secretRe.FindAllStringSubmatch(content, -1) {
-			if len(m) >= 3 {
-				secrets = append(secrets, fmt.Sprintf("%s = %s", strings.TrimSpace(m[1]), strings.TrimSpace(m[2])))
-			}
+	for _, m := range secretRe.FindAllStringSubmatch(content, -1) {
+		if len(m) >= 3 {
+			secrets = append(secrets, fmt.Sprintf("%s = %s", strings.TrimSpace(m[1]), strings.TrimSpace(m[2])))
 		}
-		for _, m := range jsAssignSecretRe.FindAllStringSubmatch(content, -1) {
-			if len(m) >= 3 {
-				secrets = append(secrets, fmt.Sprintf("%s = %s", strings.TrimSpace(m[1]), strings.TrimSpace(m[2])))
-			}
+	}
+	for _, m := range jsAssignSecretRe.FindAllStringSubmatch(content, -1) {
+		if len(m) >= 3 {
+			secrets = append(secrets, fmt.Sprintf("%s = %s", strings.TrimSpace(m[1]), strings.TrimSpace(m[2])))
 		}
+	}
 
 	// 排序输出
 	var epList []string

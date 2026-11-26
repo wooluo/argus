@@ -8,7 +8,7 @@ import (
 // 报告中的证据必须脱敏（Cookie / Authorization / token / secret）。
 func TestRedactEvidence(t *testing.T) {
 	cases := map[string]string{
-		`正常文本`:                       `正常文本`,
+		`正常文本`:                         `正常文本`,
 		`Cookie: abc123`:               `Cookie: ***`,
 		`Authorization: Bearer tok123`: `Authorization: ***`,
 		`url?token=abc&id=1`:           `token=***`,
