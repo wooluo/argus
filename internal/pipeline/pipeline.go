@@ -62,6 +62,9 @@ type Brief struct {
 	// 时刻的剩余秒数，TimeLimitSeconds 是总时长上限；0=不限时。
 	TimeBudgetSeconds int `json:"time_budget_seconds"`
 	TimeLimitSeconds  int `json:"time_limit_seconds"`
+	// 限速参数（server 按设置页 limits.request_rate / max_concurrency 下发；
+	// nil=不限速）。
+	Limits *tools.Limits `json:"limits"`
 }
 
 // Finding / Asset / LogItem 与 server ReportResult 请求体字段一一对应。
@@ -240,16 +243,34 @@ func (m *memReporter) flush(ctx context.Context) {
 // ---- tools.Reporter 接口实现 ----
 
 func (m *memReporter) SaveAsset(_ context.Context, typ, value string, meta map[string]any) {
-	detail := ""
-	if meta != nil {
-		if s, ok := meta["detail"].(string); ok {
-			detail = s
-		}
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.res.Assets = append(m.res.Assets, Asset{Type: typ, Value: value, Detail: detail})
+	m.res.Assets = append(m.res.Assets, Asset{Type: typ, Value: value, Detail: assetDetail(meta)})
 	m.flushLocked()
+}
+
+// assetDetail 资产明细，存进 server 的 detail 列（JSON 文本）。
+//
+// 以前只认 meta["detail"] 这一个字符串字段，其余字段全丢：httpx 探到的
+// 状态码、标题、技术栈，子域名的根域名，端口的协议与服务——全都没进库，
+// 存下去的是空串（不是合法 JSON，资产中心因此整页空白）。现在 meta 里有
+// 字符串 detail（web_login 的会话详情）就用它，否则把整个 meta 存成 JSON。
+func assetDetail(meta map[string]any) string {
+	if meta == nil {
+		return "{}"
+	}
+	if s, ok := meta["detail"].(string); ok && s != "" {
+		if json.Valid([]byte(s)) {
+			return s
+		}
+		b, _ := json.Marshal(map[string]any{"detail": s, "source": meta["source"]})
+		return string(b)
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func (m *memReporter) SaveFinding(_ context.Context, f tools.Finding) (int64, error) {

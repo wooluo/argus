@@ -18,16 +18,35 @@ import (
 // ================= Tasks =================
 // 对齐原 api/tasks.py：启动/停止/详情/日志。
 
+// taskSelect 任务列表与详情共用的查询：带出项目名——任务中心「项目」列读的是
+// project_name（接口曾不带这个字段，整列空白）。
+const taskSelect = `SELECT t.id,t.project_id,COALESCE(NULLIF(p.name,''),'#'||t.project_id),
+	t.status,t.mode,t.current_stage,t.tokens,t.stages_done,t.message,t.created_at,t.started_at,t.finished_at
+	FROM tasks t LEFT JOIN projects p ON p.id=t.project_id`
+
+func scanTask(sc interface{ Scan(dest ...any) error }, t *store.Task) error {
+	var started, finished sql.NullString
+	if err := sc.Scan(&t.ID, &t.ProjectID, &t.ProjectName, &t.Status, &t.Mode, &t.CurrentStage,
+		&t.Tokens, &t.StagesDone, &t.Message, &t.CreatedAt, &started, &finished); err != nil {
+		return err
+	}
+	t.StartedAt = nilStr(started)
+	t.FinishedAt = nilStr(finished)
+	t.Present()
+	return nil
+}
+
+// ListTasks GET /api/tasks 与 /api/projects/{id}/tasks。
 func (a *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 	pid, _ := strconv.ParseInt(r.URL.Query().Get("project_id"), 10, 64)
-	q := `SELECT id,project_id,status,mode,current_stage,tokens,stages_done,message,created_at,started_at,finished_at FROM tasks`
-	var rows *sql.Rows
-	var err error
+	q := taskSelect
+	var args []any
 	if pid > 0 {
-		rows, err = a.DB.Query(q+` WHERE project_id=? ORDER BY id DESC`, pid)
-	} else {
-		rows, err = a.DB.Query(q + ` ORDER BY id DESC`)
+		q += ` WHERE t.project_id=?`
+		args = append(args, pid)
 	}
+	q += ` ORDER BY t.id DESC`
+	rows, err := a.DB.Query(q, args...)
 	if err != nil {
 		respondErr(w, 500, err.Error())
 		return
@@ -36,14 +55,10 @@ func (a *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 	out := []store.Task{}
 	for rows.Next() {
 		var t store.Task
-		var started, finished sql.NullString
-		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Status, &t.Mode, &t.CurrentStage, &t.Tokens, &t.StagesDone, &t.Message, &t.CreatedAt, &started, &finished); err != nil {
+		if err := scanTask(rows, &t); err != nil {
 			respondErr(w, 500, err.Error())
 			return
 		}
-		t.StartedAt = nilStr(started)
-		t.FinishedAt = nilStr(finished)
-		t.Present()
 		out = append(out, t)
 	}
 	respondJSON(w, 200, out)
@@ -56,9 +71,7 @@ func (a *API) GetTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var t store.Task
-	var started, finished sql.NullString
-	err = a.DB.QueryRow(`SELECT id,project_id,status,mode,current_stage,tokens,stages_done,message,created_at,started_at,finished_at FROM tasks WHERE id=?`, id).
-		Scan(&t.ID, &t.ProjectID, &t.Status, &t.Mode, &t.CurrentStage, &t.Tokens, &t.StagesDone, &t.Message, &t.CreatedAt, &started, &finished)
+	err = scanTask(a.DB.QueryRow(taskSelect+` WHERE t.id=?`, id), &t)
 	if errors.Is(err, sql.ErrNoRows) {
 		respondErr(w, 404, "task not found")
 		return
@@ -67,9 +80,6 @@ func (a *API) GetTask(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, 500, err.Error())
 		return
 	}
-	t.StartedAt = nilStr(started)
-	t.FinishedAt = nilStr(finished)
-	t.Present()
 	respondJSON(w, 200, t)
 }
 

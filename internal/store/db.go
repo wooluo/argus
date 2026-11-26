@@ -117,6 +117,11 @@ func migrate(db *sql.DB) error {
 	for _, stmt := range alters {
 		_, _ = db.Exec(stmt)
 	}
+	// 数据修复（幂等）：资产的 detail 曾被写成空串——不是合法 JSON，接口把
+	// 整个资产列表转成 JSON 时失败、响应体为空，资产中心整页空白。
+	if _, err := db.Exec(`UPDATE assets SET detail='{}' WHERE detail=''`); err != nil {
+		return fmt.Errorf("fix assets.detail: %w", err)
+	}
 	return nil
 }
 
@@ -127,6 +132,8 @@ var alters = []string{
 	`ALTER TABLE nodes ADD COLUMN last_deploy TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN tunnel_ssh TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE nodes ADD COLUMN ssh_conf TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE nodes ADD COLUMN tools TEXT NOT NULL DEFAULT ''`,    // 节点心跳上报的工具状态 JSON
+	`ALTER TABLE nodes ADD COLUMN tools_at TEXT NOT NULL DEFAULT ''`, // 最近一次上报时间
 }
 
 var migrations = []string{

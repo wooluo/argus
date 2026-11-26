@@ -23,6 +23,7 @@ import (
 	"github.com/wooluo/argus/internal/deploy"
 	"github.com/wooluo/argus/internal/intel"
 	"github.com/wooluo/argus/internal/store"
+	"github.com/wooluo/argus/internal/tools"
 )
 
 // NodeAPI: 执行面 API（argus-node 调用）。
@@ -82,7 +83,12 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 		LastDeploy string `json:"last_deploy"` // 最近一次部署结果 JSON（ok/message/steps）
 		Tunnel     bool   `json:"tunnel"`      // SSH 隧道回连是否托管中
 		HasSSH     bool   `json:"has_ssh"`     // SSH 观测凭据（部署写入或详情配置）
-		sshConf    string
+		// 已保存的连接参数（「编辑 → 重新部署」和「SSH 观测」弹窗带出用）；
+		// 密码 / 私钥不出接口
+		SSHPort int    `json:"ssh_port"`
+		SSHUser string `json:"ssh_user"`
+		SSHAuth string `json:"ssh_auth"`
+		sshConf string
 	}
 	out := []nodeRow{}
 	for rows.Next() {
@@ -93,6 +99,13 @@ func (n *NodeAPI) ListNodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.HasSSH = v.sshConf != ""
+		var saved struct {
+			Port     int    `json:"port"`
+			Username string `json:"username"`
+			AuthType string `json:"auth_type"`
+		}
+		_ = json.Unmarshal([]byte(v.sshConf), &saved)
+		v.SSHPort, v.SSHUser, v.SSHAuth = saved.Port, saved.Username, saved.AuthType
 		// 状态动态化：deploying/deploy_failed 原样；其余按心跳新鲜度判
 		// （心跳周期 15s，45s 容忍）
 		if v.Status != "deploying" && v.Status != "deploy_failed" {
@@ -202,10 +215,12 @@ func (n *NodeAPI) Register(w http.ResponseWriter, r *http.Request) {
 	jout(w, 201, map[string]any{"node_id": id, "token": tok})
 }
 
-// Heartbeat: POST /api/nodes/heartbeat {"node_id":1} — 更新 last_seen。
+// Heartbeat: POST /api/nodes/heartbeat {"node_id":1,"tools":[…]} — 更新 last_seen；
+// tools 是节点上报的工具状态（有变化才落库，设置页按节点查看用）。
 func (n *NodeAPI) Heartbeat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		NodeID int64 `json:"node_id"`
+		NodeID int64           `json:"node_id"`
+		Tools  json.RawMessage `json:"tools"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NodeID == 0 {
 		jerr(w, 422, "node_id required")
@@ -214,6 +229,14 @@ func (n *NodeAPI) Heartbeat(w http.ResponseWriter, r *http.Request) {
 	if _, err := n.DB.Exec(`UPDATE nodes SET last_seen=?,status='online' WHERE id=?`, store.Now(), req.NodeID); err != nil {
 		jerr(w, 500, err.Error())
 		return
+	}
+	if len(req.Tools) > 0 && json.Valid(req.Tools) {
+		var cur string
+		_ = n.DB.QueryRow(`SELECT tools FROM nodes WHERE id=?`, req.NodeID).Scan(&cur)
+		if cur != string(req.Tools) {
+			_, _ = n.DB.Exec(`UPDATE nodes SET tools=?, tools_at=? WHERE id=?`,
+				string(req.Tools), store.Now(), req.NodeID)
+		}
 	}
 	n.Bus.Publish("node_heartbeat", map[string]any{"node_id": req.NodeID})
 	jout(w, 200, map[string]any{"ok": true})
@@ -353,6 +376,7 @@ func (n *NodeAPI) Poll(w http.ResponseWriter, r *http.Request) {
 		"github_token":     store.GetSetting(n.DB, "github_token"),
 		"continue_summary": continueSummary,
 		"verify_findings":  limitBool(n.DB, "autonomous_verify", true), // 收工后独立核验
+		"limits":           pollLimits(n.DB),                           // 限速参数：request_rate / max_concurrency
 		"time_budget": map[string]any{
 			"remaining_seconds": remaining, "limit_seconds": limit},
 		"models": models,
@@ -367,6 +391,27 @@ func limitBool(db *sql.DB, key string, def bool) bool {
 		return v
 	}
 	return def
+}
+
+// pollLimits 读 settings.limits 里的数值限速项。没有配置时返回 nil，
+// 节点收到 nil 即不限速，沿用原有的工具内建退避。
+func pollLimits(db *sql.DB) *tools.Limits {
+	var raw map[string]any
+	_ = json.Unmarshal([]byte(store.GetSetting(db, "limits")), &raw)
+	if raw == nil {
+		return nil
+	}
+	l := &tools.Limits{}
+	if v, ok := raw["request_rate"].(float64); ok && v > 0 {
+		l.RequestRate = v
+	}
+	if v, ok := raw["max_concurrency"].(float64); ok && v > 0 {
+		l.MaxConcurrency = int(v)
+	}
+	if l.RequestRate <= 0 && l.MaxConcurrency <= 0 {
+		return nil
+	}
+	return l
 }
 
 // mcpServer Poll 下发给节点的 MCP 服务器配置（节点侧 mcp.go 反序列化）。
@@ -757,11 +802,12 @@ func (n *NodeAPI) persistNodeBatch(taskID int64, findings, assets, logs, traffic
 		}
 	}
 	for _, s := range req.Assets {
-		// 去重：同项目同类型同值已存在则更新 detail（资产回流合并而非堆行）
+		// 去重：同项目同类型同值已存在则更新 detail（资产回流合并而非堆行）。
+		// detail 收拾成合法 JSON：空串会让整个资产列表转 JSON 失败。
 		if _, err := n.DB.Exec(`INSERT INTO assets(project_id,type,value,detail,source)
 			SELECT project_id,?,?,?,'node' FROM tasks WHERE id=?
 			AND NOT EXISTS(SELECT 1 FROM assets a WHERE a.project_id=tasks.project_id AND a.type=? AND a.value=?)`,
-			s.Type, s.Value, s.Detail, taskID, s.Type, s.Value); err != nil {
+			s.Type, s.Value, store.NormalizeJSON(s.Detail), taskID, s.Type, s.Value); err != nil {
 			return err
 		}
 	}
@@ -985,7 +1031,31 @@ func (n *NodeAPI) pushNotify(taskID int64, status, message string) {
 	}()
 }
 
-// DeployNode: POST /api/nodes/deploy — SSH 引导式节点部署。
+// reuseSavedSecret 部署表单里留空的密码 / 私钥，沿用该节点上次保存的——
+// 「编辑 → 重新部署」不必每次重敲。只在主机和用户名都没变时沿用：换了
+// 目标还拿旧密码去试，轻则认证失败，重则把对方账号试锁。
+func reuseSavedSecret(db *sql.DB, req *deploy.SSHConfig) {
+	if req.Password != "" && req.PrivateKey != "" {
+		return
+	}
+	var raw string
+	_ = db.QueryRow(`SELECT ssh_conf FROM nodes WHERE name=?`, req.NodeName).Scan(&raw)
+	var saved deploy.SSHConfig
+	if json.Unmarshal([]byte(raw), &saved) != nil ||
+		!strings.EqualFold(strings.TrimSpace(saved.Host), strings.TrimSpace(req.Host)) ||
+		saved.Username != req.Username ||
+		(saved.AuthType != "" && saved.AuthType != req.AuthType) {
+		return
+	}
+	if req.Password == "" {
+		req.Password = saved.Password
+	}
+	if req.PrivateKey == "" {
+		req.PrivateKey = saved.PrivateKey
+	}
+}
+
+// DeployNode: POST /api/nodes/deploy — SSH 引导部署执行节点（异步，进度经 SSE 推送）。
 // UI 填 VPS 连接信息 → server SSH 上去装 argus-node → 节点自行回连注册。
 func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 	var req deploy.SSHConfig
@@ -1016,6 +1086,7 @@ func (n *NodeAPI) DeployNode(w http.ResponseWriter, r *http.Request) {
 	if req.AuthType == "" {
 		req.AuthType = "password"
 	}
+	reuseSavedSecret(n.DB, &req)
 	if req.ServerURL == "" {
 		req.ServerURL = "http://" + localIP() + ":7887"
 	}

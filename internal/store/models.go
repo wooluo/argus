@@ -1,10 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -38,11 +40,34 @@ func (r *RawJSON) Scan(src any) error {
 }
 
 // MarshalJSON: 避免 []byte 默认 base64 序列化。
+//
+// 库里存了空串或不合法的 JSON 时也不能让整份响应失败：encoding/json 遇到
+// 一个字段出错就一个字节都不输出（状态码还是 200）——资产中心曾因此整页
+// 空白，962 条资产的 detail 是空串。空的输出 null，不合法的包进 _invalid。
 func (r RawJSON) MarshalJSON() ([]byte, error) {
-	if r == nil {
+	trimmed := bytes.TrimSpace(r)
+	if len(trimmed) == 0 {
 		return []byte("null"), nil
 	}
-	return r, nil
+	if json.Valid(trimmed) {
+		return trimmed, nil
+	}
+	b, _ := json.Marshal(map[string]string{"_invalid": string(trimmed)})
+	return b, nil
+}
+
+// NormalizeJSON 把要存进 JSON 文本列的值收拾成合法 JSON：空的用 {}，不合法的
+// 包进 _raw 字段——读出来永远能过 json_valid。
+func NormalizeJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(s)) {
+		return s
+	}
+	b, _ := json.Marshal(map[string]string{"_raw": s})
+	return string(b)
 }
 
 func (r RawJSON) Value() (driver.Value, error) {
@@ -65,8 +90,11 @@ type Project struct {
 }
 
 type Task struct {
-	ID           int     `json:"id"`
-	ProjectID    int     `json:"project_id"`
+	ID        int `json:"id"`
+	ProjectID int `json:"project_id"`
+	// ProjectName 查询时带出（非 DB 列）：任务中心「项目」列读它；项目已删或
+	// 无名时是 #<id>
+	ProjectName  string  `json:"project_name"`
 	Name         string  `json:"name"`
 	Status       string  `json:"status"`
 	Mode         string  `json:"mode"`
@@ -110,13 +138,16 @@ func (t *Task) Present() {
 }
 
 type Asset struct {
-	ID        int     `json:"id"`
-	ProjectID int     `json:"project_id"`
-	Type      string  `json:"type"`
-	Value     string  `json:"value"`
-	Detail    RawJSON `json:"detail"`
-	Source    string  `json:"source"`
-	CreatedAt string  `json:"created_at"`
+	ID        int `json:"id"`
+	ProjectID int `json:"project_id"`
+	// ProjectName 查询时带出（非 DB 列）：资产中心「所属项目」列读它；项目已删
+	// 或无名时是 #<id>
+	ProjectName string  `json:"project_name"`
+	Type        string  `json:"type"`
+	Value       string  `json:"value"`
+	Detail      RawJSON `json:"detail"`
+	Source      string  `json:"source"`
+	CreatedAt   string  `json:"created_at"`
 }
 
 type Finding struct {

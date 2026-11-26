@@ -225,7 +225,7 @@ func (a *API) ScopeSentryImport(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := a.DB.Exec(
 			`INSERT INTO assets(project_id,type,value,detail,source) VALUES(?,?,?,?,?)`,
-			pid, t, v, detail, "ScopeSentry"); err != nil {
+			pid, t, v, store.NormalizeJSON(detail), "ScopeSentry"); err != nil {
 			respondErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}

@@ -44,7 +44,7 @@ func Run(ctx context.Context, b Brief, onFlush func(Result) error) *Result {
 	tc := &tools.Context{
 		TaskID: b.TaskID, ProjectID: b.ProjectID, ProjectName: b.ProjectName,
 		Description: b.Description,
-		Reporter:    rep,
+		Reporter:    rep, Limits: b.Limits,
 	}
 	// scope 护栏
 	tc.Scope = scope.New(b.ProjectID, b.Scope, b.AllowHosts)

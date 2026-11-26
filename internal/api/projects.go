@@ -35,6 +35,31 @@ func pathID(r *http.Request) (int64, error) {
 
 // ================= Projects =================
 
+// projectStats / projectLastTask 项目列表每一行都要显示的汇总和最近一条任务。
+type projectStats struct {
+	Domains  int64 `json:"domains"`
+	URLs     int64 `json:"urls"`
+	Ports    int64 `json:"ports"`
+	Findings int64 `json:"findings"`
+}
+
+type projectLastTask struct {
+	ID        int64  `json:"id"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+}
+
+type projectRow struct {
+	store.Project
+	Stats    projectStats     `json:"stats"`
+	LastTask *projectLastTask `json:"last_task"` // 没跑过任务为 null
+}
+
+// ListProjects GET /api/projects —— 每行带 stats（资产/漏洞计数）和 last_task。
+//
+// 页面那两格按这两个字段渲染。接口曾一度不带它们：「资产/漏洞」一格读取
+// stats 时报错，整格被丢掉，右边的列全部左移一格——「最近任务」下面是操作
+// 按钮、「操作」列是空的。汇总按项目一次分组查出来，不逐行查。
 func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.DB.Query(`SELECT id,name,description,scope,authorized,allow_hosts,created_at FROM projects ORDER BY id DESC`)
 	if err != nil {
@@ -42,9 +67,9 @@ func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	out := []store.Project{}
+	out := []projectRow{}
 	for rows.Next() {
-		var p store.Project
+		var p projectRow
 		var auth int
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Scope, &auth, &p.AllowHosts, &p.CreatedAt); err != nil {
 			respondErr(w, 500, err.Error())
@@ -53,7 +78,94 @@ func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 		p.Authorized = auth == 1
 		out = append(out, p)
 	}
+	stats, err := projectStatsBy(a.DB)
+	if err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	last, err := lastTasksBy(a.DB)
+	if err != nil {
+		respondErr(w, 500, err.Error())
+		return
+	}
+	for i := range out {
+		if s := stats[int64(out[i].ID)]; s != nil {
+			out[i].Stats = *s
+		}
+		out[i].LastTask = last[int64(out[i].ID)]
+	}
 	respondJSON(w, 200, out)
+}
+
+// projectStatsBy 各项目的资产数（按类型）与漏洞数；没有记录的项目不在结果里。
+func projectStatsBy(db *sql.DB) (map[int64]*projectStats, error) {
+	out := map[int64]*projectStats{}
+	get := func(id int64) *projectStats {
+		s := out[id]
+		if s == nil {
+			s = &projectStats{}
+			out[id] = s
+		}
+		return s
+	}
+	rows, err := db.Query(`SELECT project_id, type, COUNT(*) FROM assets GROUP BY project_id, type`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id int64
+		var typ string
+		var n int64
+		if err := rows.Scan(&id, &typ, &n); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		switch s := get(id); typ {
+		case "domain":
+			s.Domains = n
+		case "url":
+			s.URLs = n
+		case "port":
+			s.Ports = n
+		}
+	}
+	rows.Close()
+	rows, err = db.Query(`SELECT project_id, COUNT(*) FROM findings GROUP BY project_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, n int64
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		get(id).Findings = n
+	}
+	return out, rows.Err()
+}
+
+// lastTasksBy 各项目编号最大的一条任务；状态词与管理面其它出口一致
+// （done → completed 等）。
+func lastTasksBy(db *sql.DB) (map[int64]*projectLastTask, error) {
+	rows, err := db.Query(`SELECT project_id, id, status, created_at FROM tasks
+		WHERE id IN (SELECT MAX(id) FROM tasks GROUP BY project_id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]*projectLastTask{}
+	for rows.Next() {
+		var pid int64
+		var status string
+		t := &projectLastTask{}
+		if err := rows.Scan(&pid, &t.ID, &status, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		t.Status = store.PresentStatus(status)
+		out[pid] = t
+	}
+	return out, rows.Err()
 }
 
 func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
