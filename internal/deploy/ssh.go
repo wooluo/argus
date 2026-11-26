@@ -107,22 +107,14 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	}()
 	step("SSH 连接成功")
 
-	// probeOne 独立会话取命令输出（探测/上传校验通用；幽灵时返回空串）
-	// probeOne 执行探测命令并取输出。x/crypto SSH 客户端同连接快速开新会话时
-	// 存在间歇性输出丢失/损坏（实测 30 次约 4 次返回空或 \x00 字节），
-	// 输出无效（空或含 NUL）视为失败并重试。
+	// probeOne 执行探测命令并取输出（探测/上传校验通用；取不到返回空串）。
+	// 输出为空或含 NUL 视为失败并重试：以前这里的空输出来自 Stdout/Stderr 共用
+	// bytes.Buffer 的并发截断（见 safeBuffer，已修），重试保留下来应对真实的
+	// 瞬时故障。
 	probeOne := func(cmd string) string {
 		for range 3 {
-			s, err := client.NewSession()
-			if err != nil {
-				return ""
-			}
-			var b bytes.Buffer
-			s.Stdout = &b
-			s.Stderr = &b
-			_ = runCmd(s, cmd, 15*time.Second)
-			s.Close()
-			out := strings.TrimSpace(b.String())
+			out, _ := runCapture(client, cmd, 15*time.Second)
+			out = strings.TrimSpace(out)
 			if out != "" && !strings.ContainsRune(out, 0) {
 				return out
 			}
@@ -173,11 +165,10 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		step("二进制: " + filepath.Base(binaryPath))
 	}
 
-	// 3.5 环境探测 + sudo 谈判——刻意赶在上传前：该机 exec 通道输出随机
-	// 丢失且上传大文件后高发，命令执行本身可靠。sudo 验证走「效果落盘」：
-	// sudo touch 的标记文件在磁盘上，ls 探测任意一次拿到输出即定论。
-	//（实测该 VPS 非交互 shell 下部分外部命令零输出——echo/cat/chmod/uname
-	// 可用，id/systemctl/管道/|| 偶发全空——逐条探测 + 绝对路径兜底）
+	// 3.5 环境探测 + sudo 谈判——刻意赶在上传前的安静窗口。sudo 验证走
+	// 「效果落盘」：sudo touch 的标记文件在磁盘上，不依赖命令回显；探测
+	// 逐条独立执行 + 绝对路径兜底。（以前记在这里的「exec 通道随机丢输出」
+	// 已查明是 Stdout/Stderr 共用 bytes.Buffer 的并发截断，见 safeBuffer。）
 	envInfo := probeOne(`echo "SHELL=$0 PATH=$PATH"`)
 	step("远端环境: " + tools.Truncate(envInfo, 160))
 
@@ -189,13 +180,13 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		uid = probeOne("/bin/id -u")
 	}
 	if uid == "" {
-		uid = probeOne("id -u") // 幽灵间歇 → 再试一次
+		uid = probeOne("id -u") // 偶发取不到 → 再试一次
 	}
 	sysctlPath := ""
 	for _, p := range []string{"/usr/bin/systemctl", "/bin/systemctl", "/sbin/systemctl"} {
 		ver := probeOne(p + " --version")
 		if !strings.Contains(ver, "systemd") {
-			ver = probeOne(p + " --version") // 幽灵间歇 → 再试
+			ver = probeOne(p + " --version") // 偶发取不到 → 再试
 		}
 		if strings.Contains(ver, "systemd") {
 			sysctlPath = p
@@ -219,7 +210,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 		mark := fmt.Sprintf("/tmp/.argus-sudo-%d", time.Now().UnixNano()) // 时间戳防残留误判
 		trySudo := func(feed string) bool {
-			_ = probeOne(feed + "touch " + mark) // 执行可靠，输出丢失无关紧要
+			_ = probeOne(feed + "touch " + mark) // 成败看落盘的标记文件，不看回显
 			time.Sleep(250 * time.Millisecond)
 			_ = probeOne(feed + "touch " + mark) // 双保险
 			for range 4 {
@@ -242,12 +233,19 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 			sudoFeed := "printf '%s\\n' " + quote(pw) + " | sudo -S -p '' "
 			if !trySudo(sudoFeed) {
 				return fail("远端用户 " + cfg.Username + " 非 root 且 sudo 密码验证未通过" +
-					"（已试登录密码；若密码确信无误，可能为输出丢失，重试部署即可）——或改用 root 登录")
+					"（已试登录密码；请确认该用户的 sudo 密码，或改用 root 登录）")
 			}
 			step("sudo 密码模式（非 root + 非免密 sudo）")
 			sudo = sudoFeed
 		}
 	}
+
+	// 节点服务的 PATH。systemd 起的服务只有系统默认 PATH，不读 .zshrc：部署
+	// 它的那个用户放在 ~/bin、~/go/bin 里的工具一概看不到，节点上就「工具用
+	// 不了」而交互终端里明明有。把部署用户的这几个目录写进服务的 PATH——
+	// 这个用户本来就有 sudo，不构成新的提权面。
+	svcPath := servicePath(probeOne, cfg.Username)
+	step("节点服务 PATH: " + svcPath)
 
 	// 4. 节点程序落到远端 /tmp/argus-node + 字节数校验（平台推送 / GitHub
 	// 下载两条来源在此汇合，后续安装启动步骤共用）
@@ -261,8 +259,8 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 			return fail(err.Error())
 		}
 	} else {
-		// 上传（cat 写入，7MB 给足 3 分钟）；幽灵会吞掉上传错误导致 exit 0
-		// 假成功——校验远端实际字节数，不符自动重传一次；wc 无输出时尽力而为放行
+		// 上传（cat 写入，7MB 给足 3 分钟）。不只看退出码——校验远端实际
+		// 字节数，不符自动重传一次；wc 无输出时尽力而为放行
 		step("上传二进制（约 7MB，视上行带宽 10s-3min）…")
 		if st, err := os.Stat(cfg.BinaryPath); err == nil {
 			localSize = st.Size()
@@ -273,7 +271,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 			}
 			ns := strings.Fields(probeOne("wc -c < /tmp/argus-node"))
 			if len(ns) == 0 {
-				return true // 幽灵无输出 → 放行
+				return true // wc 无输出 → 放行
 			}
 			if v, err := strconv.ParseInt(ns[0], 10, 64); err == nil && v != localSize {
 				step(fmt.Sprintf("远端字节数 %d ≠ 本地 %d（上传不完整）", v, localSize))
@@ -298,26 +296,14 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	}
 
 	// 5. 安装 + 配置 systemd + 启动——分步执行 + echo 标记判定 + 失败重试。
-	// 该 VPS 的 exec 通道存在间歇性幽灵（外部命令输出/exit 码随机丢失，
-	// systemctl 一次探测不到、一次能到）——exit 码不可信，但内建 echo 的
-	// 回显稳定：每条命令包装 `( cmd ) && echo __OK__ || echo __FAIL__$?`，
-	// 以标记判成败；失败自动重试一次。
+	// 每条命令包装 `( cmd ) && echo __ARGUS_OK__ || echo __ARGUS_FAIL_$?`，
+	// 以标记判成败并保留远端输出；没拿到标记（超时 / 会话异常）时重试，
+	// 真实失败不重试，失败后再整步重试一次。
 	runStepRaw := func(name, cmd string) error {
-		// 幽灵间歇（同连接快速开会话输出丢失，实测上传大文件后高发）→
-		// 内部验证标记 + 重试 3 次；真实失败（__ARGUS_FAIL_）立即返回不重试。
 		var lastErr error
 		for range 3 {
-			s, err := client.NewSession()
-			if err != nil {
-				return fmt.Errorf("%s: 创建会话失败: %w", name, err)
-			}
-			var out bytes.Buffer
-			s.Stdout = &out
-			s.Stderr = &out
 			wrapped := "( " + cmd + " ) && echo __ARGUS_OK__ || echo __ARGUS_FAIL_$?"
-			rerr := runCmd(s, wrapped, 120*time.Second)
-			s.Close()
-			o := out.String()
+			o, rerr := runCapture(client, wrapped, 120*time.Second)
 			switch {
 			case strings.Contains(o, "__ARGUS_FAIL_"):
 				return fmt.Errorf("%s 失败（远端输出: %s）", name, tools.Truncate(o, 800))
@@ -335,11 +321,10 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return lastErr
 	}
 	runStep := func(name, cmd string) error {
-		// 步骤间隔：x/crypto 同连接快速开会话会间歇丢失输出（另一提交实测
-		// 30 次约 4 次）——降频规避
+		// 步骤间隔（历史上为规避「输出丢失」加的降频；根因已修，间隔保留）
 		time.Sleep(250 * time.Millisecond)
 		if err := runStepRaw(name, cmd); err != nil {
-			time.Sleep(800 * time.Millisecond) // 幽灵间歇 → 重试一次
+			time.Sleep(800 * time.Millisecond) // 整步重试一次
 			if err2 := runStepRaw(name+"（重试）", cmd); err2 != nil {
 				return err2
 			}
@@ -347,13 +332,13 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return nil
 	}
 
-	// 5.2 安装二进制：目录降级 + **效果验证**（cp 的 OK 标记会被幽灵吞——
-	// mkdir 全成功说明目录可写，cp"失败"极可能是误判；以目标文件字节数
-	// 等于本地下节数为准，wc 也被吞时回退标记判定）。
+	// 5.2 安装二进制：目录降级 + **效果验证**——cp 的成功标记没拿到时，以
+	// 目标文件字节数等于本地字节数为准（命令实际成功但回执没收到的情况）；
+	// 字节数也取不到才换下一个目录。
 	verifyBin := func(path string) bool {
 		ns := strings.Fields(probeOne("wc -c < " + path))
 		if len(ns) == 0 {
-			return false // wc 也被吞 → 无法确认
+			return false // 取不到字节数 → 无法确认
 		}
 		v, err := strconv.ParseInt(ns[0], 10, 64)
 		return err == nil && v == localSize
@@ -361,16 +346,17 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 	binPath := ""
 	for _, dir := range []string{"/usr/local/bin", "/opt/argus", "/root"} {
 		_ = runStep("mkdir "+dir, sudo+"mkdir -p "+dir)
-		cpErr := runStep("cp → "+dir,
-			sudo+"cp /tmp/argus-node "+dir+"/argus-node && "+sudo+"chmod 755 "+dir+"/argus-node")
+		cpErr := runStep("cp → "+dir, installBinCmd(sudo, dir))
 		target := dir + "/argus-node"
 		if cpErr == nil || verifyBin(target) { // 标记成功 或 效果验证成功
 			if cpErr != nil {
-				step("cp 标记被吞但字节数验证通过: " + target)
+				step("cp 回执未收到，字节数校验通过: " + target)
 			}
 			binPath = target
 			break
 		}
+		// 换目录这件事要让人看见：静默换掉的话，步骤里只会有另一个目录的 ✓
+		step("装不进 " + dir + "：" + cpErr.Error() + "；换下一个目录")
 	}
 	if binPath == "" {
 		return fail("二进制安装失败（三个目录 cp 均无法确认，标记与字节数验证都未通过）——" +
@@ -385,16 +371,16 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		// env 前缀 + nohup + 后台 + 脱离会话（stdin/stdout 重定向防 SSH 退出牵连；
 		// 日志写 $HOME——非 root 写不了 /var/log）
 		startCmd := fmt.Sprintf(
-			`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > ${HOME:-/tmp}/argus-node.log 2>&1 < /dev/null &`,
-			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))
+			`PATH=%s ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > ${HOME:-/tmp}/argus-node.log 2>&1 < /dev/null &`,
+			shellQuote(svcPath), shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken))
 		if err := runStep("nohup 启动节点", startCmd); err != nil {
 			return fail(err.Error())
 		}
 		// 开机自启：/etc/cron.d/argus-node 单文件覆盖写（heredoc 在远端 sh
 		// 兼容层 exit 2——echo 单行 + tee 最稳，重定向不经 sudo 会以普通用户
 		// 落盘而失败；幂等不堆行；失败不阻塞）
-		cronLine := fmt.Sprintf("@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
-			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
+		cronLine := fmt.Sprintf("@reboot root PATH=%s ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
+			svcPath, shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
 			binPath + " >> ${HOME:-/tmp}/argus-node.log 2>&1"
 		if err := runStep("cron.d 自启",
 			sudo+"mkdir -p /etc/cron.d && printf '%s\\n' "+shellQuote(cronLine)+" | "+sudo+
@@ -428,6 +414,7 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		"Environment=ARGUS_SERVER=" + cfg.ServerURL,
 		"Environment=ARGUS_NAME=" + cfg.NodeName,
 		"Environment=ARGUS_TOKEN=" + cfg.NodeToken,
+		"Environment=PATH=" + svcPath,
 		"ExecStart=" + binPath,
 		"Restart=always",
 		"RestartSec=5",
@@ -449,12 +436,12 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		return fail(err.Error())
 	}
 
-	// 5.4 systemd 三连（绝对路径）——全系软化：该机 systemctl 的输出/标记/
-	// exit 码都会被幽灵随机吞（daemon-reload 上次 ✓ 这次空），命令可能实际
-	// 已成功。全部降级为警告 + 多路兜底，部署成败以服务器侧节点心跳为准。
+	// 5.4 systemd 三连（绝对路径）——全系软化：systemctl 的回执拿不到时命令
+	// 可能实际已成功，不该据此判部署失败。全部降级为警告 + 多路兜底，部署
+	// 成败以服务器侧节点心跳为准。
 	softStep := func(name, cmd string) bool {
 		if err := runStep(name, cmd); err != nil {
-			step(name + " 结果未知（输出被吞，可能已成功）: " + err.Error())
+			step(name + " 结果未知（未收到回执，可能已成功）: " + err.Error())
 			return false
 		}
 		return true
@@ -467,8 +454,8 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		step("systemd 启动不可确认 → nohup 兜底启动")
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 		_ = softStep("nohup 兜底启动",
-			fmt.Sprintf(`ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > ${HOME:-/tmp}/argus-node.log 2>&1 < /dev/null &`,
-				shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)))
+			fmt.Sprintf(`PATH=%s ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s nohup `+binPath+` > ${HOME:-/tmp}/argus-node.log 2>&1 < /dev/null &`,
+				shellQuote(svcPath), shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)))
 	} else {
 		step("systemd 服务已启动")
 	}
@@ -476,16 +463,16 @@ func DeployWithProgress(cfg SSHConfig, onStep DeployProgress) Result {
 		// enable 未知 → cron.d 兜底自启（幂等单文件；tee 经 sudo 落盘，
 		// 重定向以普通用户执行会失败）
 		shellQuote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-		cronLine := fmt.Sprintf("@reboot root ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
-			shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
+		cronLine := fmt.Sprintf("@reboot root PATH=%s ARGUS_SERVER=%s ARGUS_NAME=%s ARGUS_TOKEN=%s ",
+			svcPath, shellQuote(cfg.ServerURL), shellQuote(cfg.NodeName), shellQuote(cfg.NodeToken)) +
 			binPath + " >> ${HOME:-/tmp}/argus-node.log 2>&1"
 		_ = softStep("cron.d 兜底自启",
 			sudo+"mkdir -p /etc/cron.d && printf '%s\\n' "+shellQuote(cronLine)+" | "+sudo+
 				"tee /etc/cron.d/argus-node > /dev/null")
 	}
 
-	// 6. 存活验证：is-active 同样不可信（输出被吞）——交服务器心跳判定，
-	// 此处只尽力看一眼，结果不影响部署结论。
+	// 6. 存活验证：这里只尽力看一眼，结果不影响部署结论——存活以服务器
+	// 心跳判定。
 	time.Sleep(2 * time.Second)
 	if s3, err := client.NewSession(); err == nil {
 		var checkOut bytes.Buffer
@@ -686,27 +673,58 @@ func uploadFile(client *ssh.Client, localPath, remotePath string) error {
 }
 
 // remoteRun 在远端执行一条命令并返回合并输出（GitHub 下载用）。成败不由
-// 本函数判定——该机 exec 通道会随机吞输出与 exit 码（见 DeployWithProgress
-// 注释），调用方按标记 + 效果校验自行解读。
+// 本函数判定，调用方按标记 + 效果校验（落盘字节数 / sha256）自行解读。
 func remoteRun(client *ssh.Client, cmd string, timeout time.Duration) (string, error) {
-	session, err := client.NewSession()
-	if err != nil {
-		return "", err
-	}
-	defer session.Close()
-	var out bytes.Buffer
-	session.Stdout = &out
-	session.Stderr = &out
-	done := make(chan error, 1)
-	go func() { done <- session.Run(cmd) }()
-	select {
-	case err := <-done:
-		return out.String(), err
-	case <-time.After(timeout):
-		_ = session.Signal(ssh.SIGKILL)
-		return out.String(), fmt.Errorf("命令超时（>%s）", timeout)
-	}
+	return runCapture(client, cmd, timeout)
 }
+
+// installBinCmd 把上传到 /tmp/argus-node 的节点程序装进 dir：先拷成临时名、
+// 改权限，再 mv 顶替。
+//
+// 不能直接 cp 覆盖 argus-node：节点服务正跑着这个文件时，内核不允许写一个
+// 运行中的可执行文件（Text file busy）。每次重新部署都会在第一个目录「失败」
+// 再落到下一个目录，ExecStart 在两个路径之间来回跳，而失败那一步在部署
+// 步骤里还看不到。rename 换的是目录项，运行中的进程继续用旧文件。
+func installBinCmd(sudo, dir string) string {
+	tmp := dir + "/.argus-node.new"
+	return sudo + "cp /tmp/argus-node " + tmp + " && " +
+		sudo + "chmod 755 " + tmp + " && " +
+		sudo + "mv -f " + tmp + " " + dir + "/argus-node"
+}
+
+// servicePath 节点服务的 PATH：系统默认目录 + Go 工具链 + 部署用户家目录下的
+// bin / go/bin / .local/bin。
+//
+// 服务不读 .zshrc：部署它的那个用户在交互终端里能用的工具，服务里未必找得到
+// （实测 Kali 上 subfinder 在 ~/bin，节点报「go install 失败: go 不在 PATH」）。
+// 只放部署用户自己的目录——这个用户本来就有 sudo；别的用户的 ~/bin 不能进
+// root 服务的 PATH，那等于谁都能往里放一个假的 nmap。
+func servicePath(probe func(string) string, user string) string {
+	dirs := []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+		"/usr/local/go/bin"}
+	if home := remoteHome(probe, user); home != "" {
+		dirs = append(dirs, home+"/bin", home+"/go/bin", home+"/.local/bin")
+	}
+	return strings.Join(dirs, ":")
+}
+
+// remoteHome 远端用户的家目录；用户名或取回的路径里带 shell 特殊字符、取不到
+// 时都返回空——宁可服务找不到工具，也不把拼出来的串写进单元文件。
+func remoteHome(probe func(string) string, user string) string {
+	user = strings.TrimSpace(user)
+	if user == "" || strings.ContainsAny(user, unsafeForShell) {
+		return ""
+	}
+	for _, cmd := range []string{"getent passwd " + user + " | cut -d: -f6", "echo ~" + user} {
+		home := strings.TrimSuffix(strings.TrimSpace(probe(cmd)), "/")
+		if strings.HasPrefix(home, "/") && !strings.ContainsAny(home, unsafeForShell) {
+			return home
+		}
+	}
+	return ""
+}
+
+const unsafeForShell = " \t\r\n'\"`$\\;|&<>()*?[]{}!"
 
 func min(a, b int) int {
 	if a < b {
