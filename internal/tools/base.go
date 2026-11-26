@@ -4,9 +4,13 @@ package tools
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 )
 
 // Error 工具执行错误（会作为 tool 消息回给模型继续推理，不终止任务）。
@@ -109,6 +113,10 @@ type Context struct {
 	Session  *Session       // 登录会话（auth_session 维护）
 	Workdir  string         // 节点本地工作目录（脚本/产物）
 	Extra    map[string]any // 扩展位（MCP 工具/节点元数据）
+	// Limits 任务级限速参数，由 server 按设置页 limits 下发（nil=不限速）。
+	// Throttle 由 DoRequest 按 Limits 创建；外部只读，内部线程安全。
+	Limits   *Limits
+	throttle *Throttle
 }
 
 // Tool 内置工具接口。
@@ -127,6 +135,78 @@ var registry = map[string]Tool{}
 
 // Register 注册工具（重名后者覆盖，便于测试替换）。
 func Register(t Tool) { registry[t.Name()] = t }
+
+// DoRequest 经限速层发 HTTP 请求。follow=true 跟随重定向（最多 10 跳）并捕获
+// Set-Cookie 写回会话；follow=false 只请求给定 URL。返回 (状态码, 响应体, 最终URL,
+// 拦截信息, 错误)。
+//
+// 所有自研 HTTP 工具都应走这个方法，不要自己建 http.Client——否则限速和拦截
+// 识别都不生效，被目标封了模型也不知道。
+func (tc *Context) DoRequest(ctx context.Context, method, rawURL, body string, headers map[string]string, follow bool) (int, string, string, *BlockInfo, error) {
+	if tc.Limits != nil {
+		if tc.throttle == nil {
+			tc.throttle = NewThrottle(*tc.Limits)
+		}
+		release, err := tc.throttle.Acquire(ctx)
+		if err != nil {
+			return 0, "", "", nil, err
+		}
+		defer release()
+	}
+
+	cl := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           proxyFunc(TargetProxy()),
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	var finalURL string
+	if follow {
+		cl.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, strings.NewReader(body))
+	if err != nil {
+		return 0, "", "", nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Argus/0.1)")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, "", "", nil, err
+	}
+	defer resp.Body.Close()
+	status := resp.StatusCode
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	respBody := string(b)
+	if follow && resp.Request != nil {
+		finalURL = resp.Request.URL.String()
+	} else {
+		finalURL = rawURL
+	}
+	// Set-Cookie 回写会话
+	if follow && tc.Session != nil && tc.Session.Cookies != nil {
+		for _, c := range resp.Cookies() {
+			if c.Value != "" {
+				tc.Session.Cookies[c.Name] = c.Value
+			}
+		}
+	}
+	block := DetectBlock(status, resp.Header, respBody)
+	if block != nil && tc.throttle != nil {
+		tc.throttle.Penalize()
+	} else if tc.throttle != nil {
+		tc.throttle.okRequest()
+	}
+	return status, respBody, finalURL, block, nil
+}
 
 // All 全量工具（自主模式全量放开，与原版一致）。
 func All() []Tool {

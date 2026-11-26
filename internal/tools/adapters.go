@@ -96,12 +96,12 @@ func (HttpxProbeTool) Execute(ctx context.Context, args map[string]any, tc *Cont
 	if err != nil {
 		return "", Errorf("%v", err)
 	}
+	if err := ensurePdHTTPX(bin); err != nil {
+		return "", Errorf("%v", err)
+	}
 	out, err := runTool(ctx, toolTimeout, strings.Join(cleaned, "\n")+"\n",
 		bin, "-json", "-silent", "-title", "-tech-detect", "-status-code",
 		"-web-server", "-timeout", "15")
-	if err != nil && out == "" {
-		return "", Errorf("httpx 执行失败: %v", err)
-	}
 	var alive []map[string]any
 	for _, j := range jsonLines(out) {
 		u, _ := j["url"].(string)
@@ -132,9 +132,16 @@ func (HttpxProbeTool) Execute(ctx context.Context, args map[string]any, tc *Cont
 			tc.Reporter.SaveAsset(ctx, "tech", tech, map[string]any{"url": u})
 		}
 	}
-	return MustJSON(map[string]any{
+	if err := toolFailed("httpx", out, err, len(alive) > 0); err != nil {
+		return "", Errorf("%v", err)
+	}
+	res := map[string]any{
 		"tool": "httpx", "input": len(cleaned), "alive": len(alive), "results": alive,
-	}), nil
+	}
+	if note := InterruptedNote("httpx", out, err, len(alive) > 0); note != "" {
+		res["note"] = note
+	}
+	return MustJSON(res), nil
 }
 
 // ========== katana（对应 adapters/katana_tool.py：katana_crawl） ==========
@@ -178,9 +185,6 @@ func (KatanaCrawlTool) Execute(ctx context.Context, args map[string]any, tc *Con
 	out, err := runTool(ctx, 300*time.Second, "",
 		bin, "-u", u, "-d", fmt.Sprintf("%d", depth), "-silent",
 		"-timeout", "10", "-js-crawl", "-concurrency", "10", "-rate-limit", "150")
-	if err != nil && out == "" {
-		return "", Errorf("katana 执行失败: %v", err)
-	}
 	var urls []string
 	seen := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
@@ -194,9 +198,16 @@ func (KatanaCrawlTool) Execute(ctx context.Context, args map[string]any, tc *Con
 	if len(urls) > 500 {
 		urls = urls[:500]
 	}
-	return MustJSON(map[string]any{
+	if err := toolFailed("katana", out, err, len(urls) > 0); err != nil {
+		return "", Errorf("%v", err)
+	}
+	res := map[string]any{
 		"tool": "katana", "start": u, "depth": depth, "found": len(urls), "urls": urls,
-	}), nil
+	}
+	if note := InterruptedNote("katana", out, err, len(urls) > 0); note != "" {
+		res["note"] = note
+	}
+	return MustJSON(res), nil
 }
 
 // ========== sqlmap（对应 adapters/sqlmap_tool.py：sqlmap_detect，仅检测不提取） ==========
@@ -233,8 +244,10 @@ func (SqlmapDetectTool) Execute(ctx context.Context, args map[string]any, tc *Co
 	}
 	argv := append([]string{toolPath("sqlmap"), "-u", u}, sqlmapDetectArgs...)
 	out, err := runTool(ctx, 900*time.Second, "", argv...)
-	if err != nil && out == "" {
-		return "", Errorf("sqlmap 执行失败: %v", err)
+	// sqlmap 的 banner 一定含自己的名字：有 banner 才说明它真跑起来了
+	started := strings.Contains(out, "sqlmap")
+	if err := toolFailed("sqlmap", out, err, started); err != nil {
+		return "", Errorf("%v", err)
 	}
 	vulnerable := strings.Contains(out, "is vulnerable") || strings.Contains(out, "might be injectable")
 	var params []string
@@ -254,10 +267,14 @@ func (SqlmapDetectTool) Execute(ctx context.Context, args map[string]any, tc *Co
 			Source: "sqlmap",
 		})
 	}
-	return MustJSON(map[string]any{
+	res := map[string]any{
 		"tool": "sqlmap", "url": u, "vulnerable": vulnerable,
 		"params": params, "dbms": dbms, "tail": Truncate(out, 800),
-	}), nil
+	}
+	if note := InterruptedNote("sqlmap", out, err, started); note != "" {
+		res["note"] = note
+	}
+	return MustJSON(res), nil
 }
 
 func orUnknown(s string) string {
@@ -302,9 +319,6 @@ func (SubfinderTool) Execute(ctx context.Context, args map[string]any, tc *Conte
 		return "", Errorf("%v", err)
 	}
 	out, err := runTool(ctx, toolTimeout, "", bin, "-d", domain, "-json", "-silent", "-timeout", "120")
-	if err != nil && out == "" {
-		return "", Errorf("subfinder 执行失败: %v", err)
-	}
 	suffix := "." + domain
 	var subdomains []string
 	for _, j := range jsonLines(out) {
@@ -343,11 +357,18 @@ func (SubfinderTool) Execute(ctx context.Context, args map[string]any, tc *Conte
 	}
 	ret := append(hv, others...)
 	sort.Strings(ret)
-	return MustJSON(map[string]any{
+	if err := toolFailed("subfinder", out, err, len(subdomains) > 0); err != nil {
+		return "", Errorf("%v", err)
+	}
+	res := map[string]any{
 		"tool": "subfinder", "domain": domain,
 		"total": len(subdomains), "wildcard": wildcard, "wild_count": wildCount,
 		"unresolved": unresolved, "returned": len(ret), "subdomains": ret,
-	}), nil
+	}
+	if note := InterruptedNote("subfinder", out, err, len(subdomains) > 0); note != "" {
+		res["note"] = note
+	}
+	return MustJSON(res), nil
 }
 
 var hvKeywords = []string{"admin", "api", "test", "dev", "uat", "staging", "stage", "internal",
@@ -401,9 +422,6 @@ func (NmapScanTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 	}
 	out, err := runTool(ctx, toolTimeout, "",
 		toolPath("nmap"), "-sV", "-T4", "--version-intensity", "5", "-Pn", target)
-	if err != nil && out == "" {
-		return "", Errorf("nmap 执行失败: %v", err)
-	}
 	// -sV 文本输出解析（保真原版行为）
 	var ports []map[string]any
 	portLine := regexp.MustCompile(`^(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)$`)
@@ -422,9 +440,16 @@ func (NmapScanTool) Execute(ctx context.Context, args map[string]any, tc *Contex
 		tc.Reporter.SaveAsset(ctx, "port", net.JoinHostPort(target, port),
 			map[string]any{"proto": proto, "service": p["service"], "version": p["version"]})
 	}
-	return MustJSON(map[string]any{
+	if err := toolFailed("nmap", out, err, len(ports) > 0); err != nil {
+		return "", Errorf("%v", err)
+	}
+	res := map[string]any{
 		"tool": "nmap", "target": target, "ports": ports, "raw": Truncate(out, 2000),
-	}), nil
+	}
+	if note := InterruptedNote("nmap", out, err, len(ports) > 0); note != "" {
+		res["note"] = note
+	}
+	return MustJSON(res), nil
 }
 
 // ========== nuclei（对应 adapters/nuclei_tool.py：nuclei_scan 模板漏洞扫描） ==========
@@ -473,15 +498,15 @@ func (NucleiScanTool) Execute(ctx context.Context, args map[string]any, tc *Cont
 	if err != nil {
 		return "", Errorf("%v", err)
 	}
+	if err := ensureNucleiTemplates(ctx, bin); err != nil {
+		return "", Errorf("%v", err)
+	}
 	argv := []string{bin, "-jsonl", "-silent", "-timeout", "15",
 		"-target-file", "-", "-concurrency", "25", "-bulk-size", "25", "-headless"}
 	if tmpl != "" {
 		argv = append(argv, "-t", tmpl)
 	}
 	out, err := runTool(ctx, toolTimeout, strings.Join(cleaned, "\n")+"\n", argv...)
-	if err != nil && out == "" {
-		return "", Errorf("nuclei 执行失败: %v", err)
-	}
 	var findings []map[string]any
 	for _, j := range jsonLines(out) {
 		tid, _ := j["template-id"].(string)
@@ -520,10 +545,17 @@ func (NucleiScanTool) Execute(ctx context.Context, args map[string]any, tc *Cont
 			Source:   "nuclei",
 		})
 	}
-	return MustJSON(map[string]any{
+	if err := toolFailed("nuclei", out, err, len(findings) > 0); err != nil {
+		return "", Errorf("%v", err)
+	}
+	res := map[string]any{
 		"tool": "nuclei", "input": len(cleaned), "templates": tmpl,
 		"findings": len(findings), "results": findings,
-	}), nil
+	}
+	if note := InterruptedNote("nuclei", out, err, len(findings) > 0); note != "" {
+		res["note"] = note
+	}
+	return MustJSON(res), nil
 }
 
 func init() {

@@ -21,9 +21,9 @@ func TestCheckBlacklist(t *testing.T) {
 }
 
 // TestRegistryCount 全部工具注册成功（init panic / 漏注册都会在此暴露）。
-// 32 = 原 31 个 + knowledge_get（按需拉取知识条目全文）。
+// 35 = 34 个 + dalfox_scan（XSS 验证）。
 func TestRegistryCount(t *testing.T) {
-	if n := len(Names()); n != 32 {
-		t.Fatalf("registered %d tools, want 32: %v", n, Names())
+	if n := len(Names()); n != 35 {
+		t.Fatalf("registered %d tools, want 35: %v", n, Names())
 	}
 }

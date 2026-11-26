@@ -98,7 +98,7 @@ func NewPacer() *Pacer { return &Pacer{base: 250 * time.Millisecond, mult: 1} }
 // blockCodes 视为拦截的状态码（与 AutoPentent AdaptivePacer 一致）。
 func isBlockStatus(code int) bool {
 	switch code {
-	case 403, 406, 429, 444, 501:
+	case 403, 406, 429, 444, 450, 501, 503:
 		return true
 	}
 	return false
