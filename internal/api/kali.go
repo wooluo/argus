@@ -153,8 +153,7 @@ func (a *API) TestNodeSSH(w http.ResponseWriter, r *http.Request) {
 			"error": "节点未配置 SSH 凭据（详情里配置，或重新部署时自动写入）"})
 		return
 	}
-	// echo 重试 3 次：该类 VPS 存在 x/crypto SSH 输出间歇丢失（命令成功
-	// 但 stdout 被吞，err=<nil> 且无 SSH_OK）——任一次拿到标记即算通。
+	// echo 至多试 3 次：命令成功却没拿到 SSH_OK 标记时重试，任一次拿到即算通。
 	var out string
 	for i := 0; i < 3; i++ {
 		out, err = deploy.RunSSH(conf.Host, conf.Port, conf.Username, conf.AuthType,
@@ -170,10 +169,10 @@ func (a *API) TestNodeSSH(w http.ResponseWriter, r *http.Request) {
 	}
 	if !strings.Contains(out, "SSH_OK") {
 		if err == nil {
-			// TCP+认证已过、命令成功但输出被吞——按可用处理并如实标注
+			// TCP+认证已过、命令成功但没拿到回显——按可用处理并如实标注
 			respondJSON(w, http.StatusOK, map[string]any{
 				"ok": true,
-				"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d；远端输出被吞无法回显，该机已知 SSH 库输出丢失问题）",
+				"info": fmt.Sprintf("SSH 登录成功（%s@%s:%d；远端未回显命令输出）",
 					conf.Username, conf.Host, conf.Port),
 			})
 			return

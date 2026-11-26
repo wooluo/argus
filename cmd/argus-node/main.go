@@ -5,6 +5,7 @@
 //	ARGUS_NAME             节点名，默认 hostname
 //	ARGUS_TOKEN            管理凭证，仅用于首次注册
 //	ARGUS_NODE_TOKEN_FILE  节点 token 文件，默认 ~/.argus-node.json
+//	ARGUS_TOOL_<NAME>      指定外部工具路径，如 ARGUS_TOOL_HTTPX=/opt/httpx/httpx
 package main
 
 import (
@@ -18,9 +19,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/wooluo/argus/internal/tools"
 )
 
 var (
@@ -41,6 +45,7 @@ func main() {
 
 	log.SetPrefix("[argus-node] ")
 	log.Printf("server=%s name=%s", serverURL, nodeName)
+	reportToolchain()
 
 	nodeTok = loadToken(tokFile)
 	if nodeTok == "" {
@@ -197,8 +202,25 @@ func registerAndSave(tokFile string) bool {
 	return true
 }
 
+// reportToolchain 把节点自己装工具的目录补进 PATH，并把缺失的外部工具打进
+// 日志——journalctl -u argus-node 能直接看到节点到底缺什么。服务方式启动时
+// PATH 里没有 ~/bin、~/go/bin（kali_install / go install 的安装位置），不补的
+// 话工具装了也找不到，节点只会报「go 不在 PATH」。
+func reportToolchain() {
+	if added := tools.ExtendPATH(); len(added) > 0 {
+		log.Printf("PATH 补充: %s", strings.Join(added, string(os.PathListSeparator)))
+	}
+	for _, t := range tools.Status(nil) {
+		if t["kind"] == "adapter" && t["available"] == false {
+			log.Printf("工具缺失: %s（二进制 %v）—— %v", t["name"], t["binary"], t["fallback_for"])
+		}
+	}
+}
+
 func heartbeat() bool {
-	code, _, err := call("POST", "/api/nodes/heartbeat", map[string]any{"node_id": nodeID})
+	// 顺带上报工具状态：设置页「工具链状态」按节点看的就是这个
+	code, _, err := call("POST", "/api/nodes/heartbeat", map[string]any{
+		"node_id": nodeID, "tools": tools.Status(nil)})
 	return err == nil && code == 200
 }
 

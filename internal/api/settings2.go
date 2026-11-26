@@ -76,10 +76,44 @@ func (a *API) GenerateAuth(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, 200, map[string]any{"ok": true, "token": tok})
 }
 
-// ToolsStatus GET /api/tools —— 注册表状态（name/kind/binary/available/fallback_for/exec_at）。
+// ToolsStatus GET /api/tools —— 工具链状态。tools_status 是 server 本机的探测
+// 结果；任务实际在节点上执行，外部工具用的是节点上的，各节点随心跳上报的
+// 状态放在 nodes 里（设置页按节点查看）。只看本机那张表会全是 ✅ 而节点上
+// 工具一个都用不了。
 func (a *API) ToolsStatus(w http.ResponseWriter, r *http.Request) {
 	paths := settingJSON(a.DB, "tools")
-	respondJSON(w, 200, ToolsStatusList(paths))
+	respondJSON(w, 200, map[string]any{
+		"tools_status": ToolsStatusList(paths),
+		"nodes":        NodeToolStatus(a.DB),
+	})
+}
+
+// NodeToolStatus 各节点最近上报的工具状态（没上报过的不列）。节点上报的行
+// exec_at 标成 node，和本机的 local 区分。
+func NodeToolStatus(db *sql.DB) []map[string]any {
+	rows, err := db.Query(`SELECT id,name,status,tools,tools_at FROM nodes WHERE tools != '' ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var name, status, raw, at string
+		if err := rows.Scan(&id, &name, &status, &raw, &at); err != nil {
+			continue
+		}
+		var ts []map[string]any
+		if json.Unmarshal([]byte(raw), &ts) != nil {
+			continue
+		}
+		for _, t := range ts {
+			t["exec_at"] = "node"
+		}
+		out = append(out, map[string]any{"id": id, "name": name, "status": status,
+			"tools": ts, "tools_at": at})
+	}
+	return out
 }
 
 // PutTools PUT /api/settings/tools —— 自定义工具路径（空值剔除），保存后重探测。

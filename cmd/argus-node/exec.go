@@ -50,7 +50,9 @@ type pollTask struct {
 	} `json:"fofa"`
 	ContinueSummary string `json:"continue_summary"` // 断点续测：上轮成果摘要
 	VerifyFindings  bool   `json:"verify_findings"`  // 收工后独立核验（设置 limits.autonomous_verify）
-	TimeBudget      struct {
+	// 限速参数（设置页 limits.request_rate / max_concurrency；空=不限速）
+	Limits     *tools.Limits `json:"limits"`
+	TimeBudget struct {
 		RemainingSeconds int `json:"remaining_seconds"` // 领取时刻的剩余秒数（0=不限时）
 		LimitSeconds     int `json:"limit_seconds"`     // 总时长上限
 	} `json:"time_budget"` // 时间预算：到点由 server 看门狗代停
@@ -97,6 +99,7 @@ func (p *pollTask) buildBrief() pipeline.Brief {
 	b.FOFAKey = p.FOFA.Key
 	b.ContinueSummary = p.ContinueSummary
 	b.VerifyFindings = p.VerifyFindings
+	b.Limits = p.Limits
 	b.TimeBudgetSeconds = p.TimeBudget.RemainingSeconds
 	b.TimeLimitSeconds = p.TimeBudget.LimitSeconds
 	// 分层用脑：分工给「主循环」的模型覆盖主配置，另两类各自下发
