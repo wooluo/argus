@@ -19,3 +19,6 @@ node_modules/
 data/
 data-*/
 *.db
+
+# macOS
+.DS_Store
