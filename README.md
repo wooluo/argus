@@ -51,6 +51,10 @@ ARGUS_TOKEN=your-admin-token \
 
 「GitHub 下载」用于私有仓库时需在设置页配置 GitHub Token：token 只在 server 侧换取短时效的签名下载地址，**不下发到远端机器**；远端下载后按 Release 的字节数 + sha256 校验。
 
+server 在内网 / NAT 后时勾选「SSH 隧道回连」：server 经部署用的 SSH 连接在远端开 `127.0.0.1:17887` 反向转发回本机，节点连它自己的这个端口即可，server 重启后自动恢复。同一条隧道还会把 **server 本机回环地址上的模型端口**转发到远端——主配置和模型池里启用的 `localhost:<port>` 接入点（如 LM Studio 的 `localhost:1234`）：远端节点访问它自己的 `127.0.0.1:<port>` 就是 server 本机的服务，接入点不用改成局域网地址，本机服务也不用对外开放。不走隧道的远端节点仍需能直接访问接入点地址。
+
+外部工具用的是**执行节点上的**：节点以服务方式运行，PATH 包含部署用户的 `~/bin`、`~/go/bin` 和 `/usr/local/go/bin`；节点启动日志会列出缺失的外部工具，设置页「工具链状态」可切换查看 server 本机或各节点上报的状态。工具没跑起来时（参数不认、模板缺失等）报错原文会交回给模型，不会被当成「0 个结果」。
+
 ### LLM 配置
 
 设置页配置 OpenAI 兼容端点（智谱 Coding Plan / 内网 DeepSeek / Ollama / LM Studio 均可）。内网地址自动绕过系统代理。
@@ -71,7 +75,8 @@ Agent 侦察阶段自主检索目标公网暴露资产（被动测绘，零目�
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `ARGUS_ADDR` | `:7887` | 监听地址 |
-| `ARGUS_DATA` | `./data` | 数据目录（SQLite + 设置） |
+| `ARGUS_DATA` | `./data` | 数据目录（SQLite + 设置 + 日志） |
+| `ARGUS_LOG` | `<数据目录>/argus-server.log` | server 日志文件，终端照常输出；设为 `off` 关闭 |
 | `ARGUS_TOKEN` | 空 | 管理 token（启用 API 鉴权） |
 | `ARGUS_STATIC` | 内嵌 | 前端静态目录（默认用内嵌 dist） |
 | `ARGUS_RELEASE_REPO` | `wooluo/argus` | 「GitHub 下载」部署节点时的默认 Release 仓库（fork 部署改这里） |
@@ -106,7 +111,7 @@ Agent 侦察阶段自主检索目标公网暴露资产（被动测绘，零目�
 │   ├── pipeline/       自主/阶段模式 + 任务后复盘 + 自适应预算
 │   ├── scope/          授权范围护栏（域名/IP/CIDR + allow_hosts）
 │   ├── store/          SQLite + 覆盖率测度
-│   ├── tools/          32 个内置工具（FOFA/nuclei/payload_search/...）
+│   ├── tools/          35 个内置工具（FOFA/nuclei/payload_search/...）
 │   └── ui/             前端构建产物（内嵌托管）
 └── go.mod              纯 Go 依赖（chi + modernc/sqlite，无 CGO）
 ```
@@ -149,7 +154,7 @@ Agent 侦察阶段自主检索目标公网暴露资产（被动测绘，零目�
 
 本仓库是 [wooluo/AutoPentest](https://github.com/wooluo/AutoPentest) 的 Go 重构，功能对齐：
 
-- ✅ 全部 32 个内置工具 + FOFA + 泛解析过滤 + 响应折叠 + 防空转双闸
+- ✅ 全部 35 个内置工具 + FOFA + 泛解析过滤 + 响应折叠 + 防空转双闸
 - ✅ 知识迭代（保存/BM25 检索/任务后复盘）+ 覆盖率测度 + 探索图
 - ✅ 代理体系（出站/测试流量/AIMD）+ WAF 识别 + 证明回调白名单
 - 🌟 **架构升级**：单二进制部署 / 分布式节点（NAT 友好）/ 纯 Go 无 CGO 交叉编译

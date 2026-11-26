@@ -235,7 +235,7 @@ func normalizeRepo(repo string) (string, error) {
 
 // fetchFromGitHub 远端机器直接从 GitHub Release 下载节点程序到 dst，返回
 // 字节数（后续安装步骤的字节数验证沿用）。每次尝试现换签名地址；成败以
-// 效果为准——字节数 + sha256 对账 Release 元数据，远端输出被幽灵吞掉时
+// 效果为准——字节数 + sha256 对账 Release 元数据，远端没返回校验输出时
 // 不误判成败。校验不过重新下载一次（签名地址过期/网络中断各一次机会）。
 //
 // run 在远端执行命令并返回合并输出；probe 执行探测命令并返回输出——
@@ -295,12 +295,12 @@ func githubFetchCmd(signedURL, dst string) string {
 }
 
 // verifyFetched 校验远端已下载的文件：字节数必须等于 Release 元数据，有
-// digest 时 sha256 也须一致。远端输出被幽灵吞掉（wc/sha256sum 无输出）时
+// digest 时 sha256 也须一致。远端没返回校验输出（wc/sha256sum 为空）时
 // 无法校验——放行，交给后续安装步骤的字节数验证兜底，note 写明。
 func verifyFetched(probe func(string) string, dst string, a ReleaseAsset) (ok bool, note string) {
 	f := strings.Fields(probe("wc -c < " + dst + "; sha256sum " + dst))
 	if len(f) == 0 {
-		return true, "远端输出丢失，未能校验"
+		return true, "远端未返回校验输出，未能校验"
 	}
 	if n, err := strconv.ParseInt(f[0], 10, 64); err != nil || n != a.Size {
 		return false, fmt.Sprintf("字节数 %s ≠ Release 记录的 %d", f[0], a.Size)

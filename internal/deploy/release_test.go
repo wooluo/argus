@@ -323,7 +323,7 @@ func TestFetchFromGitHub(t *testing.T) {
 		}
 	})
 
-	t.Run("远端校验输出被吞：放行并写明未校验", func(t *testing.T) {
+	t.Run("远端未返回校验输出：放行并写明未校验", func(t *testing.T) {
 		f := newFakeGitHub(t, bin)
 		dst := filepath.Join(t.TempDir(), "argus-node")
 		n, err, steps := fetch(t, f, cfgOf(f), dst, localRun(t, ""), func(string) string { return "" })
